@@ -122,7 +122,20 @@
 
 结论：DSH 的文件写入没有 "ask-then-write" 通道，`approval` 只覆盖 `ask` 决策（如沙箱化 shell 升权）。因此「写操作弹审批」这个组合在当前 DSH 里**不可达**；可选的真实语义只有「只读 / 只能改工作区 / 全权」。当前默认取**只能改工作区**。
 
-## 8. 清理状态
+## 8. 发布（2026-11-17）
+
+| 步骤 | 状态 |
+|---|---|
+| npm 包 | `@aspen138/dsh-btw@0.1.1`（registry `latest=0.1.1`，`repository.url`、`engines.dsh` 已核对） |
+| GitHub | https://github.com/yhm138/dsh-btw（public、`main`、topics `dsh-plugin` + `deepseek-harness`、MIT LICENSE、`assets/icon-180.png`、`screenshots.json`） |
+| awesome-dsh-plugin 收录 | 条目已写好并推到 fork 分支 `yhm138:add-dsh-btw`（`data/plugins/yhm138__dsh-btw.yml`，category `ui`）；**PR 待提**：该列表要求仓库创建满 1 天，本仓库 2026-11-17 创建，需等 11-18 再开 PR |
+
+### 发布过程中修掉的两个问题
+
+1. **包名被占**：`dsh-btw` 在 npm 上已被他人占用（维护者 `iluluyu`，0.0.10），改用 scope `@aspen138/dsh-btw`。
+2. **0.1.0 有缺陷，0.1.1 修复**：客户端模块 `window.__ModuleLoader__.load({ id })` 的 `id` **必须等于包名**。改包名后 0.1.0 里仍是旧 id，npm 装上的用户会注册不出右侧页签（本地重装时已复现：`sidebar.right.pane.tab` 的 occupant 消失）。0.1.1 已把 id 改成 `@aspen138/dsh-btw` 并复验 occupant 恢复。**`dsh-btw` 不要在 0.1.0 上使用。**
+
+## 9. 清理状态
 
 - `dsh-btw-probe` 已从 desktop profile 卸载（bundle 记录已移除），源码保留在 `plugins/dsh-btw-probe/` 供复跑。
 - 调研中间产物（asar 抽取、截图、脚本）在 `plugins/dsh-btw-research/`，不属于插件包。
