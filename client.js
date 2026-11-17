@@ -1,4 +1,4 @@
-// dsh-btw — Client half: the right-Sidebar "Side question" page and the
+﻿// dsh-btw — Client half: the right-Sidebar "Side question" page and the
 // compact transcript chip.
 //
 // Data source: the Chat layer's own command nodes. `/btw` is a Host command, so
@@ -14,7 +14,7 @@
 // page is a view over the same durable command records the Chat already has.
 
 window.__ModuleLoader__.load({
-  id: 'dsh-btw',
+  id: '@aspen138/dsh-btw',
   factory(require) {
     const React = require('react')
     const h = React.createElement

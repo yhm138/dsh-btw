@@ -8,6 +8,8 @@
 
 答案出现在**右侧边栏的「侧问」页签**里；对话流里只留一行安静的小标记。侧问跑在一个**临时 fork 子 agent** 里：继承当前会话已完成的轮次，工具全开，有自己的工作目录和沙箱策略，答完就释放。
 
+**安装**：npm 包 `@aspen138/dsh-btw@0.1.1`（[npm](https://www.npmjs.com/package/@aspen138/dsh-btw) · [GitHub](https://github.com/yhm138/dsh-btw)）。收录后也可在 DSH「发现」页搜 `btw` / `侧问` 一键安装。
+
 ![右侧侧问面板](docs/screenshot-panel.png)
 
 ## 它到底是什么
@@ -89,6 +91,6 @@ dsh-btw/
   docs/              验收截图与报告
 ```
 
-安装：`plugin_manager install_bundle` 指向本目录。Host 代码改动在下次 profile recomposition 生效，Client 代码改动下次页面加载生效。
+安装：npm 包 `@aspen138/dsh-btw`；本地开发时用 `plugin_manager install_bundle` 指向本目录（`link:` 安装不受 `files` 过滤）。Host 代码改动在下次 profile recomposition 生效，Client 代码改动下次页面加载生效（客户端模块 `id` 必须等于包名）。
 
 调试句柄：`window.__DSH_BTW__` 暴露 `{ tabs, right, lastError, open }`。
