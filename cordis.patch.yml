@@ -1,0 +1,38 @@
+﻿# dsh-btw bundle patch layer.
+#
+# Listing `dsh-btw` in a profile's `dsh.profile.bundles` applies this layer. The
+# row name is the BARE package name so pnpm resolves it from the profile.
+#
+# Every field below is optional; the plugin falls back to these defaults when a
+# row omits them. A profile patch that overrides this row by `id` replaces the
+# whole `config` object, so restate every key you still want.
+- insert:
+    - id: dsh-btw
+      name: '@aspen138/dsh-btw'
+      config:
+        # Refuse absurdly long questions before spending a child agent.
+        maxQuestionChars: 8000
+        # Subagent backend used for the disposable side agent. `fork` seeds the
+        # child with this conversation's completed turns; `spawn` would start it
+        # without any inherited context.
+        childProvider: fork
+        # 'ask' pauses approval-gated tools for a user decision. The prompt is
+        # rendered in the side agent's own conversation, which this plugin opens
+        # in the right Sidebar, so the answer lands where the user can see it.
+        approvalPolicy: ask
+        # Permission bundle applied to the disposable side agent: reads pass,
+        # writes ask. `inherit` would follow this profile's danger-full-access
+        # default and let the side agent write silently.
+        sideAgentPreset: workspace-write
+        # Release the child's execution handle once its answer is in hand. The
+        # child session itself stays durable (it is a normal Session).
+        disposeChild: true
+        # Hard ceiling for one side question. A child whose approval prompt is
+        # never answered is cancelled instead of holding the command open.
+        sideAgentTimeoutMs: 180000
+        # Ceiling for one answer, so a runaway child cannot fill the command row.
+        answerMaxChars: 12000
+        # Pin the child's model route. Empty inherits the parent's route, which
+        # also keeps the inherited prefix cache-reusable.
+        provider: ''
+        model: ''
