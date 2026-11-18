@@ -1,4 +1,4 @@
-﻿// dsh-btw — Client half: the right-Sidebar "Side question" page and the
+// dsh-btw — Client half: the right-Sidebar "Side question" page and the
 // compact transcript chip.
 //
 // Data source: the Chat layer's own command nodes. `/btw` is a Host command, so
@@ -130,6 +130,12 @@ window.__ModuleLoader__.load({
       '.dshbtw-chip-text{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
       '.dshbtw-chip-state{flex:none;color:var(--dsw-alias-state-idle-primary)}',
       '.dshbtw-chip-state.is-error{color:var(--dsw-alias-state-error-primary)}',
+      '.dshbtw-hbtn{display:inline-flex;align-items:center;gap:4px;height:22px;padding:0 7px;',
+      'border:0.5px solid var(--dsw-alias-border-l1);border-radius:999px;background:transparent;',
+      'color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;line-height:1;cursor:pointer}',
+      '.dshbtw-hbtn:hover{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary)}',
+      '.dshbtw-hbtn-mark{color:var(--dsw-alias-brand-primary)}',
+      '.dshbtw-hbtn-count{min-width:10px;text-align:center;color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums}',
     ].join('')
 
     // ------------------------------------------------------------------ error
@@ -305,6 +311,37 @@ window.__ModuleLoader__.load({
         h('span', { key: 'label', className: 'dshbtw-chip-label' }, t.badge),
         h('span', { key: 'text', className: 'dshbtw-chip-text' }, view.question === '' ? t.emptyQuestion : view.question),
         h('span', { key: 'state', className: view.failed ? 'dshbtw-chip-state is-error' : 'dshbtw-chip-state' }, state),
+      )
+    }
+
+    // ---------------------------------------------------------------- header
+
+    /**
+     * Persistent "side question" button in the Session header utilities.
+     *
+     * Closing the right-Sidebar tab must never strand the history: this button
+     * stays in the header whenever the session has side questions and reopens
+     * the page. It renders nothing for a session that never used `/btw`.
+     */
+    function BtwHeaderButton(props) {
+      const t = props.__btwStrings
+      const records = useBtwRecords(props.useChat)
+      if (records.length === 0) return null
+      return h(
+        'button',
+        {
+          type: 'button',
+          className: 'dshbtw-hbtn',
+          title: t.chipOpen,
+          'aria-label': `${t.badge}（${records.length}）`,
+          onClick: () => {
+            if (typeof navigation.open === 'function') navigation.open()
+          },
+        },
+        h('style', { key: 'style' }, CSS),
+        h('span', { key: 'mark', className: 'dshbtw-hbtn-mark', 'aria-hidden': true }, '◈'),
+        h('span', { key: 'label' }, t.badge),
+        h('span', { key: 'count', className: 'dshbtw-hbtn-count' }, String(records.length)),
       )
     }
 
@@ -575,6 +612,15 @@ window.__ModuleLoader__.load({
           ctx.slots.register(
             { name: 'conversation.chat.commandview', key: 'btw' },
             (props) => h(Boundary, { fallback: null }, h(BtwChip, { ...props, __btwStrings: strings })),
+          ),
+        )
+
+        // Always-present way back in: the header button reopens the page after
+        // the user closes its tab.
+        ctx.slots.inject('conversation.session.header.utilities', () =>
+          ctx.slots.register(
+            { name: 'conversation.session.header.utilities', id: 'dsh-btw-header', order: 30 },
+            (props) => h(Boundary, { fallback: null }, h(BtwHeaderButton, { ...props, __btwStrings: strings })),
           ),
         )
       },

@@ -1,6 +1,6 @@
 ﻿{
   "name": "@aspen138/dsh-btw",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Antigravity-style /btw side questions for DeepSeek Harness: ask one question mid-task, answered by a disposable forked child agent with the full tool set in its own right-Sidebar tab, without adding anything to the main session's model context.",
   "keywords": [
     "deepseek-harness",
