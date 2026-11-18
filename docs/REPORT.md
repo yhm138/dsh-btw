@@ -128,7 +128,7 @@
 |---|---|
 | npm 包 | `@aspen138/dsh-btw@0.1.2`（registry `latest`；`repository.url`、`engines.dsh` 已核对） |
 | GitHub | https://github.com/yhm138/dsh-btw（public、`main`、topics `dsh-plugin` + `deepseek-harness`、MIT LICENSE、`assets/icon-180.png`、`screenshots.json`） |
-| awesome-dsh-plugin 收录 | 条目已写好并推到 fork 分支 `yhm138:add-dsh-btw`（`data/plugins/yhm138__dsh-btw.yml`，category `ui`）；**PR 待提**：该列表要求仓库创建满 1 天，本仓库 2026-11-17 创建，需等 11-18 再开 PR |
+| awesome-dsh-plugin 收录 | 条目已写好并推到 fork 分支 `yhm138:add-dsh-btw`（`data/plugins/yhm138__dsh-btw.yml`，category `ui`）；**PR 已提交**：https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/16474 （2026-11-18 12:01 北京，仓库满 1 天后） |
 
 ### 发布过程中修掉的两个问题
 
