@@ -126,7 +126,7 @@
 
 | 步骤 | 状态 |
 |---|---|
-| npm 包 | `@aspen138/dsh-btw@0.1.1`（registry `latest=0.1.1`，`repository.url`、`engines.dsh` 已核对） |
+| npm 包 | `@aspen138/dsh-btw@0.1.2`（registry `latest`；`repository.url`、`engines.dsh` 已核对） |
 | GitHub | https://github.com/yhm138/dsh-btw（public、`main`、topics `dsh-plugin` + `deepseek-harness`、MIT LICENSE、`assets/icon-180.png`、`screenshots.json`） |
 | awesome-dsh-plugin 收录 | 条目已写好并推到 fork 分支 `yhm138:add-dsh-btw`（`data/plugins/yhm138__dsh-btw.yml`，category `ui`）；**PR 待提**：该列表要求仓库创建满 1 天，本仓库 2026-11-17 创建，需等 11-18 再开 PR |
 
@@ -134,6 +134,21 @@
 
 1. **包名被占**：`dsh-btw` 在 npm 上已被他人占用（维护者 `iluluyu`，0.0.10），改用 scope `@aspen138/dsh-btw`。
 2. **0.1.0 有缺陷，0.1.1 修复**：客户端模块 `window.__ModuleLoader__.load({ id })` 的 `id` **必须等于包名**。改包名后 0.1.0 里仍是旧 id，npm 装上的用户会注册不出右侧页签（本地重装时已复现：`sidebar.right.pane.tab` 的 occupant 消失）。0.1.1 已把 id 改成 `@aspen138/dsh-btw` 并复验 occupant 恢复。**`dsh-btw` 不要在 0.1.0 上使用。**
+
+### v0.1.2：右上角常驻按钮（用户要求「关掉后能找回来」）
+
+在 `conversation.session.header.utilities`（右对齐的工具按钮列表，已有 6 个占位者）里加了 `dsh-btw-header`：`◈ 侧问 N` 胶囊，只在本会话有侧问记录时渲染，点它打开/恢复「侧问」页签。
+
+独立浏览器实测（`verify_header_button.py`）：
+
+| 断言 | 结果 |
+|---|---|
+| 有记录时页签区出现按钮 | ✅ count=1 |
+| 点按钮打开「侧问」页 | ✅ |
+| 收起整个右栏后按钮仍在 | ✅（`docs/92-collapsed.png`） |
+| 再点按钮把右栏恢复 | ✅（`docs/93-reopened.png`） |
+
+（`docs/92-collapsed.png` 里能看到按钮位于「对话/轨迹/用量」那一行最右侧、导航按钮旁。）
 
 ## 9. 清理状态
 
