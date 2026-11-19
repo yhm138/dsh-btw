@@ -1,7 +1,7 @@
-﻿{
+{
   "name": "@aspen138/dsh-btw",
-  "version": "0.1.2",
-  "description": "Antigravity-style /btw side questions for DeepSeek Harness: ask one question mid-task, answered by a disposable forked child agent with the full tool set in its own right-Sidebar tab, without adding anything to the main session's model context.",
+  "version": "0.2.0",
+  "description": "Antigravity-style /btw side questions for DeepSeek Harness: ask one question mid-task and a disposable forked child agent answers it with the full tool set in its own right-Sidebar tab, with Markdown answers, follow-ups and a settings page, without adding anything to the main session's model context.",
   "keywords": [
     "deepseek-harness",
     "dsh-plugin",
@@ -19,6 +19,7 @@
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
+    "./package.json": "./package.json",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg"
   },
@@ -51,7 +52,8 @@
       "immediately": true,
       "inject": [
         "@deepseek-ai/dsh-client-ui-conversation",
-        "@deepseek-ai/dsh-client-ui-sidebar-right"
+        "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "@deepseek-ai/dsh-client-ui-settings"
       ]
     }
   }

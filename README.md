@@ -6,9 +6,9 @@
 /btw 那个函数签名到底是什么？用到哪些参数？
 ```
 
-答案出现在**右侧边栏的「侧问」页签**里；对话流里只留一行安静的小标记。侧问跑在一个**临时 fork 子 agent** 里：继承当前会话已完成的轮次，工具全开，有自己的工作目录和沙箱策略，答完就释放。
+答案出现在**右侧边栏的「侧问」页签**里，支持 Markdown 渲染、追问、复制；对话流里只留一行安静的小标记。侧问跑在一个**临时 fork 子 agent** 里：继承当前会话已完成的轮次，工具全开，有自己的工作目录和沙箱策略，答完就释放。
 
-**安装**：npm 包 `@aspen138/dsh-btw@0.1.1`（[npm](https://www.npmjs.com/package/@aspen138/dsh-btw) · [GitHub](https://github.com/yhm138/dsh-btw)）。收录后也可在 DSH「发现」页搜 `btw` / `侧问` 一键安装。
+**安装**：npm 包 `@aspen138/dsh-btw@0.2.0`（[npm](https://www.npmjs.com/package/@aspen138/dsh-btw) · [GitHub](https://github.com/yhm138/dsh-btw)）。收录后也可在 DSH「发现」页搜 `btw` / `侧问` 一键安装。
 
 ![右侧侧问面板](docs/screenshot-panel.png)
 
@@ -29,15 +29,28 @@
 |---|---|
 | `/btw <问题>` | 起一个子 agent 去查，右侧「侧问」页签自动打开并列出问答 |
 | `/btw` | 返回用法提示 |
+| 追问输入框 | 在同一侧问线程里继续问（见下） |
 | **右上角 `◈ 侧问 N` 按钮** | 重新打开「侧问」页签——页签关掉/右栏收起后都能靠它找回来 |
 | 点击对话流里的 `◈ 侧问 …` | 打开这条侧问的子会话页签（工具调用都在这） |
 | 「开始」页里的「侧问」卡片 | 打开「侧问」页签 |
 
-右上角按钮只在**本会话有过侧问**时出现，数量就是条目数；没问过就不占地方。截图里它长这样：
+右上角按钮只在**本会话有过侧问**时出现，数量就是条目数；没问过就不占地方。
 
 ![右上角的侧问按钮](docs/screenshot-button.png)
 
-页签里每条记录有状态（正在跑 / 已答 / 失败）和「复制问答」。记录来自当前会话的命令生命周期，换会话就是另一份列表。
+## Markdown 与追问
+
+- **答案按 Markdown 渲染**：标题、有序/无序列表、代码块、引用、行内代码、粗体/斜体、链接都支持。渲染器是本插件自带的（不依赖任何 Harness 客户端包），**不渲染原始 HTML**，所以答案无法往页面注入标记。
+- **追问**：每张卡片底部有输入框。输入后回车，问题会被填进输入框（`/btw --continue <id> …` 形式），你再按一次回车发送。这样设计是为了不在你背后花掉一轮子 agent。
+- 追问**不复用旧的子会话**，而是新起一个子 agent、把这条线程前几轮的问答拼进 prompt。原因见下面的「为什么不用 sendMessage」。
+
+![Markdown 与追问](docs/B2-followup.png)
+
+## 设置页
+
+设置 → **侧问**，可以改：子 agent 权限包、审批策略、答案长度上限、单次超时、问题长度上限、是否答完释放子 agent。保存后写回 profile 的 `cordis.patch.yml`，重启仍在。
+
+![设置页](docs/B3-final.png)
 
 ## 上下文边界
 
@@ -61,41 +74,49 @@
 
 ## 配置
 
-在 profile 的 `cordis.patch.yml` 里按 `id: dsh-btw` 覆盖（整块 `config` 替换，想保留的要重写）：
+设置页能改的项都在 profile 的 `cordis.patch.yml` 里：
 
 ```yaml
 - id: dsh-btw
   config:
-    maxQuestionChars: 8000      # 太长的问题直接拒绝
-    childProvider: fork         # fork=继承上下文；spawn=空白起步
-    approvalPolicy: ask         # 子 agent 的审批策略
-    sideAgentPreset: read-only  # 子 agent 的权限包：read-only / workspace-write / danger-full-access / inherit
-    disposeChild: true          # 答完释放执行句柄（子会话本身仍持久）
-    answerMaxChars: 12000       # 答案截断上限
-    provider: ''                # 固定子 agent 模型；空=继承父会话
+    maxQuestionChars: 8000        # 太长的问题直接拒绝
+    childProvider: fork           # fork=继承上下文；spawn=空白起步
+    approvalPolicy: ask           # 子 agent 的审批策略
+    sideAgentPreset: workspace-write  # read-only / workspace-write / danger-full-access / inherit
+    disposeChild: true            # 答完释放执行句柄（子会话本身仍持久）
+    sideAgentTimeoutMs: 900000    # 死锁兜底，不是任务预算
+    answerMaxChars: 12000         # 答案截断上限
+    provider: ''                  # 固定子 agent 模型；空=继承父会话
     model: ''
 ```
 
 ## 已知限制
 
-- **不流式**：答案随命令结果一次性返回（子 agent 的工作过程在它自己的会话里）。
+- **不流式**：答案随命令结果一次性返回（子 agent 的干活过程在它自己的会话里，那里是流式的）。
 - **审批面缺失**：见上。
-- **子会话持久化**：每次 `/btw` 会在父会话下留一个 `continuable` 子会话（标签是问题前 48 字），可在子智能体视图里看到；执行句柄会释放，会话文件不自动删。
-- **一次一个**：同一会话上一个侧问未结束时，第二个被拒绝。
+- **子会话持久化**：每次侧问（含追问）会在父会话下留一个子会话，可在子智能体视图里看到；执行句柄会释放，会话文件不自动删。
+- **一次一个**：同一会话上一个侧问未结束时，第二个被拒绝（超过 `sideAgentTimeoutMs` 会自动判定为陈旧并放行）。
 - 仅 Web/桌面客户端有这套 UI；headless / ACP / JSON-RPC 没有命令入口。
+
+## 为什么不用 `sendMessage` 追问
+
+`ctx.subagents.sendMessage()` 能把后续消息投给已存在的子会话，看起来更省。但**恢复子会话会让 subagent manager 往父会话推一条 settlement notice**（「子任务状态更新」），而那正是本功能要避免的污染；这条通知由 manager 生成，`tools.restrict()` 拦不住。所以追问改成「新起子 agent + 把线程历史拼进 prompt」。
 
 ## 开发
 
 ```text
 dsh-btw/
-  index.js           Host：/btw 命令 → fork 子 agent → 结果
-  client.js          Client：右侧页签类型 + 页面 + 对话流 chip
-  cordis.patch.yml   bundle patch（权限包默认值在这里）
+  index.js           Host：/btw 命令、fork 子 agent、线程、设置路由
+  client.js          Client：右侧页签 + 页面 + Markdown 渲染器 + chip + 头按钮 + 设置页
+  cordis.patch.yml   bundle patch（默认值在这里）
   locale/*.json      插件管理里的标题/描述
   icon.svg           插件图标
   docs/              验收截图与报告
+  test/              内嵌 Markdown 渲染器的单测
 ```
 
-安装：npm 包 `@aspen138/dsh-btw`；本地开发时用 `plugin_manager install_bundle` 指向本目录（`link:` 安装不受 `files` 过滤）。Host 代码改动在下次 profile recomposition 生效，Client 代码改动下次页面加载生效（客户端模块 `id` 必须等于包名）。
+安装：npm 包 `@aspen138/dsh-btw`；本地开发时用 `plugin_manager install_bundle` 指向本目录（`link:` 安装不受 `files` 过滤）。Host 改动在下次 profile recomposition 生效，Client 改动下次页面加载生效（**客户端模块 `id` 必须等于包名**，否则页签注册不上）。
 
-调试句柄：`window.__DSH_BTW__` 暴露 `{ tabs, right, lastError, open }`。
+调试句柄：`window.__DSH_BTW__` 暴露 `{ tabs, right, lastError, open, openChild }`。
+
+验证：`python test/markdown.test.py`（Markdown 渲染器）+ `plugins/dsh-btw-research/verify_data.py`（用 `data-*` 标记做的浏览器端到端）。

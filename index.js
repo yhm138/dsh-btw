@@ -1,4 +1,4 @@
-/**
+﻿/**
  * dsh-btw — Antigravity-style `/btw` side questions for DeepSeek Harness.
  *
  * A `/btw <question>` line asks one question "by the way" while a task is in
@@ -37,7 +37,7 @@ const DEFAULTS = Object.freeze({
   approvalPolicy: 'ask',
   sideAgentPreset: 'read-only',
   disposeChild: true,
-  sideAgentTimeoutMs: 180000,
+  sideAgentTimeoutMs: 900000,
   answerMaxChars: 12000,
 })
 
@@ -51,28 +51,50 @@ const DEFAULTS = Object.freeze({
 const CHILD_MARKER = 'dsh-btw:child='
 
 /**
- * Wrap one raw question into the child's task text.
+ * Frame one side question, optionally continuing an earlier thread.
  *
- * The child inherits the parent conversation as its seed, so this prompt only
- * has to state the side-question contract: answer this one thing, do not take
- * over the main task, and prefer checking the workspace over guessing.
+ * A follow-up is a *new* child agent told what the thread already established.
+ * Reusing the child session through `sendMessage` would be cheaper, but resuming
+ * a child publishes a settlement notice into the parent conversation — the one
+ * thing this feature must never do — and that notice is produced by the
+ * subagent manager, so no tool restriction can suppress it.
  *
- * @param question - trimmed user question.
+ * @param question - trimmed question.
+ * @param turns - earlier question/answer pairs in this thread, oldest first.
  * @returns the task text handed to the child agent.
  */
-function frameQuestion(question) {
+function frameThread(question, turns) {
+  const history = []
+  for (const turn of turns) {
+    history.push(`问：${turn.q}`)
+    history.push(`答：${turn.a}`)
+  }
   return [
     '【侧问】这是一次不打断主线任务的侧问。',
+    ...(history.length === 0 ? [] : ['', '本侧问此前已经问过（仅供你理解上下文，不要重复回答）：', ...history]),
     '',
     `问题：${question}`,
     '',
     '要求：',
     '1. 只回答这一个问题。不要继续、改写或推进主线任务；不要修改与回答问题无关的文件。',
     '2. 需要事实依据就去查：读文件、搜索、跑只读命令都可以；不要凭印象猜。',
-    '3. 如果确实需要写操作（改文件、执行有副作用的命令），先说明你要做什么；需要审批时等待审批。',
+    '3. 不要调用 send_message，也不要给父会话发任何消息或状态通知——答案直接作为本轮的回复文本返回。',
     '4. 答案要短，直接给结论和依据；不要复述上面已经说过的整段对话。',
   ].join('\n')
 }
+
+/** In-memory side-question threads, keyed by the child id the client knows. */
+const THREADS = new Map()
+
+/** Record one settled turn and return the thread's turns, capped for the prompt. */
+function rememberTurn(key, question, answer) {
+  const turns = THREADS.get(key) ?? []
+  turns.push({ q: question, a: answer })
+  while (turns.length > 8) turns.shift()
+  THREADS.set(key, turns)
+  return turns
+}
+
 
 /**
  * Normalize the raw bundle config into the options this plugin understands.
@@ -94,7 +116,7 @@ function normalizeConfig(raw) {
     approvalPolicy: input.approvalPolicy === 'inherit' ? 'inherit' : DEFAULTS.approvalPolicy,
     sideAgentPreset: text(input.sideAgentPreset, DEFAULTS.sideAgentPreset),
     disposeChild: typeof input.disposeChild === 'boolean' ? input.disposeChild : DEFAULTS.disposeChild,
-    sideAgentTimeoutMs: number(input.sideAgentTimeoutMs, DEFAULTS.sideAgentTimeoutMs, 5000, 3600000),
+    sideAgentTimeoutMs: number(input.sideAgentTimeoutMs, DEFAULTS.sideAgentTimeoutMs, 30000, 7200000),
     answerMaxChars: number(input.answerMaxChars, DEFAULTS.answerMaxChars, 200, 200000),
     provider: typeof input.provider === 'string' ? input.provider : '',
     model: typeof input.model === 'string' ? input.model : '',
@@ -141,7 +163,8 @@ function failureText(result) {
  * @param config - normalized options.
  * @returns `{ text, childId }` on success.
  */
-async function runSideAgent(ctx, invocation, question, config) {
+async function runSideAgent(ctx, invocation, question, config, parentKey) {
+  const turns = parentKey === undefined ? [] : THREADS.get(parentKey) ?? []
   const agents = ctx.get('agents')
   const subagents = ctx.get('subagents')
   if (subagents === null || subagents === undefined || typeof subagents.startActivation !== 'function') {
@@ -176,7 +199,7 @@ async function runSideAgent(ctx, invocation, question, config) {
       provider: config.childProvider,
       label: `侧问：${question.slice(0, 48)}`,
       request: {
-        prompt: [{ type: 'text', text: frameQuestion(question) }],
+        prompt: [{ type: 'text', text: frameThread(question, turns) }],
         parent,
         ...(Object.keys(agentOptions).length === 0 ? {} : { agentOptions }),
       },
@@ -190,6 +213,15 @@ async function runSideAgent(ctx, invocation, question, config) {
     }
     throw error
   }
+
+  /**
+   * The child inherits the parent's tool set, `send_message` included, and the
+   * inherited fork guidance tells it to report back with that tool. For a side
+   * question that would inject a status row into the main conversation — the
+   * one thing this feature exists to avoid — so the tool is removed from this
+   * child's scope before its first step.
+   */
+  restrictReportingTools(ctx, activation)
 
   try {
     // Apply the side agent's permission bundle before its first tool call can
@@ -232,7 +264,10 @@ async function runSideAgent(ctx, invocation, question, config) {
     if (result.stopReason !== 'completed') throw new Error(failureText(result))
     const text = answerText(result.output)
     if (text === '') throw new Error('子 agent 没有产出正文。')
-    return { text: clip(text, config.answerMaxChars), childId: String(activation.childId) }
+    const childId = String(activation.childId)
+    // Keep the thread so a follow-up can carry it, under the id the client knows.
+    if (parentKey !== undefined) rememberTurn(parentKey, question, text)
+    return { text: clip(text, config.answerMaxChars), childId }
   } finally {
     clearTimeout(timer)
     if (callerSignal !== undefined && callerSignal !== null && typeof callerSignal.removeEventListener === 'function') {
@@ -249,6 +284,190 @@ async function runSideAgent(ctx, invocation, question, config) {
 }
 
 /**
+ * Remove the reporting tools from one side agent's scope.
+ *
+ * `ctx.tools.restrict()` is the weakest tool mechanism the Harness offers: it can
+ * only remove tools, it is scoped to one agent's context, and it keeps schema
+ * presentation, lookup, and execution aligned. Removing `send_message` (and the
+ * team tool that would page another agent) is what keeps a side answer from
+ * arriving in the main conversation as a notice.
+ *
+ * @param ctx - Host plugin context.
+ * @param activation - the freshly started side activation.
+ */
+function restrictReportingTools(ctx, activation) {
+  const agents = ctx.get('agents')
+  const child = agents !== null && agents !== undefined && typeof agents.get === 'function'
+    ? agents.get(activation.childId)
+    : undefined
+  if (child === undefined || child === null || typeof child !== 'object') return
+  const tools = toolsOf(child)
+  if (tools === undefined || typeof tools.restrict !== 'function') return
+  try {
+    // `restrict` takes `{ allow?, deny? }` — a predicate is rejected, and an
+    // empty filter is a no-op — and returns the effect disposer, which stays
+    // owned by the child's own context lifetime.
+    tools.restrict({ deny: ['send_message', 'spawn_teammate', 'wait_agent', 'list_agents', 'interrupt_agent'] })
+  } catch {
+    /* a child that already started keeps the prompt-level instruction instead */
+  }
+}
+
+/**
+ * Resolve the tool registry visible to one agent.
+ *
+ * A Cordis context hands out traceable proxies on access, so the registry is
+ * read through the agent's own context rather than assumed to hang off a fixed
+ * property name.
+ *
+ * @param child - the live child agent.
+ * @returns the tool registry, or undefined when this build exposes none.
+ */
+function toolsOf(child) {
+  const candidate = child.ctx
+  if (candidate === null || candidate === undefined || typeof candidate !== 'object') return undefined
+  if (typeof candidate.get === 'function') {
+    const tools = candidate.get('tools')
+    if (tools !== null && tools !== undefined) return tools
+  }
+  if (typeof candidate.tools === 'object' && candidate.tools !== null) return candidate.tools
+  return undefined
+}
+
+/** Route that serves this plugin's own settings to its settings page. */
+const SETTINGS_ROUTE = '/api/dsh-btw/settings'
+
+/** The config keys the settings page may read and write. */
+const EDITABLE_KEYS = Object.freeze([
+  'maxQuestionChars',
+  'childProvider',
+  'approvalPolicy',
+  'sideAgentPreset',
+  'disposeChild',
+  'sideAgentTimeoutMs',
+  'answerMaxChars',
+  'provider',
+  'model',
+])
+
+/** Coerce one submitted value to the type its config key expects. */
+function coerce(key, value) {
+  if (key === 'disposeChild') return value === true || value === 'true'
+  if (key === 'maxQuestionChars' || key === 'sideAgentTimeoutMs' || key === 'answerMaxChars') {
+    const number = Number(value)
+    return Number.isFinite(number) ? number : undefined
+  }
+  return typeof value === 'string' ? value : undefined
+}
+
+/**
+ * Serve this plugin's editable settings over one same-origin route.
+ *
+ * The route lives behind DSH's own browser authentication funnel (it is an
+ * `/api` path on the Host web server, and the browser reaches it with the
+ * session it already authenticated with), so the page needs no credential of
+ * its own. Reads report the effective config; writes go through
+ * `configEditor.edit`, which persists to the profile patch and reconciles the
+ * Loader — the same path the plugin manager uses.
+ *
+ * @param ctx - Host plugin context.
+ * @param config - normalized options.
+ * @returns a disposer, or undefined when the Host has no web server.
+ */
+function mountSettingsRoute(ctx, config) {
+  const webServer = ctx.get('webServer')
+  if (webServer === null || webServer === undefined || typeof webServer.register !== 'function') return undefined
+
+  const readBody = (req) =>
+    new Promise((resolve, reject) => {
+      const chunks = []
+      let size = 0
+      req.on('data', (chunk) => {
+        size += chunk.length
+        if (size > 64 * 1024) {
+          reject(new Error('body too large'))
+          req.destroy()
+          return
+        }
+        chunks.push(chunk)
+      })
+      req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+      req.on('error', reject)
+    })
+
+  const reply = (res, status, value) => {
+    const body = JSON.stringify(value)
+    res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+    res.end(body)
+  }
+
+  const currentConfig = () => {
+    const editor = ctx.get('configEditor')
+    if (editor === null || editor === undefined || typeof editor.configuration !== 'function') return undefined
+    const rows = editor.configuration()
+    const row = rows.find((item) => item.entry?.id === 'dsh-btw' || item.entry?.options?.id === 'dsh-btw')
+    if (row === undefined) return undefined
+    return { row, merged: { ...row.inherited, ...row.override } }
+  }
+
+  const handler = async (req, res) => {
+    try {
+      if (req.method === 'GET') {
+        const found = currentConfig()
+        const values = {}
+        const merged = found === undefined ? { ...config } : found.merged
+        for (const key of EDITABLE_KEYS) values[key] = merged[key] ?? config[key]
+        reply(res, 200, { ok: true, values, editable: EDITABLE_KEYS, supported: found !== undefined })
+        return
+      }
+      if (req.method === 'POST') {
+        const raw = await readBody(req)
+        let parsed
+        try {
+          parsed = JSON.parse(raw)
+        } catch {
+          reply(res, 400, { ok: false, error: 'invalid JSON' })
+          return
+        }
+        const editor = ctx.get('configEditor')
+        if (editor === null || editor === undefined || typeof editor.edit !== 'function') {
+          reply(res, 503, { ok: false, error: 'configEditor unavailable in this profile' })
+          return
+        }
+        const found = currentConfig()
+        if (found === undefined) {
+          reply(res, 409, { ok: false, error: 'plugin row not found in the profile patch' })
+          return
+        }
+        const next = { ...found.merged }
+        for (const key of EDITABLE_KEYS) {
+          if (!(key in (parsed ?? {}))) continue
+          const value = coerce(key, parsed[key])
+          if (value !== undefined) next[key] = value
+        }
+        try {
+          await editor.edit(found.row.entry, () => next)
+        } catch (error) {
+          reply(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
+          return
+        }
+        reply(res, 200, { ok: true, values: next })
+        return
+      }
+      reply(res, 405, { ok: false, error: 'method not allowed' })
+    } catch (error) {
+      try {
+        reply(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
+      } catch {
+        /* the response may already be gone */
+      }
+    }
+  }
+
+  return webServer.register({ kind: 'exact', path: SETTINGS_ROUTE, handler })
+}
+
+/**
  * Register `/btw` for every composed human-command adapter.
  *
  * The handler settles the whole child run before returning, so the answer
@@ -261,10 +480,56 @@ async function runSideAgent(ctx, invocation, question, config) {
  */
 export function apply(ctx, rawConfig) {
   const config = normalizeConfig(rawConfig)
+  /**
+   * Side questions that are still settling, keyed by parent session.
+   *
+   * The entry records when it was taken. A child whose turn never settles (an
+   * approval nobody answered, a provider that stalls) would otherwise block the
+   * session forever, so an entry older than the configured timeout is treated as
+   * stale and replaced instead of refusing the new question.
+   */
   const inFlight = new Map()
 
+  /** Whether a fresh side question may start for this parent. */
+  const busy = (parentId) => {
+    const since = inFlight.get(parentId)
+    if (since === undefined) return false
+    if (Date.now() - since < config.sideAgentTimeoutMs) return true
+    inFlight.delete(parentId)
+    return false
+  }
+
   const handler = async (invocation) => {
-    const question = typeof invocation.rawInput === 'string' ? invocation.rawInput.trim() : ''
+    const raw = typeof invocation.rawInput === 'string' ? invocation.rawInput.trim() : ''
+
+    // `/btw --continue <childId> <question>` continues an existing side
+    // conversation. The Client builds this form from the panel's follow-up box.
+    // `rawInput` arrives with the leading whitespace the user typed preserved,
+    // so the marker is matched after trimming.
+    const followUp = /^--continue\s+(\S+)\s+([\s\S]+)$/u.exec(raw)
+    if (followUp !== null) {
+      const childId = followUp[1]
+      const question = followUp[2].trim()
+      if (question === '') return { kind: 'error', text: '追问内容为空。' }
+      const parentId = invocation.agent.id
+      if (busy(parentId)) {
+        return { kind: 'error', text: '上一个侧问还在跑，等它结束再问。' }
+      }
+      inFlight.set(parentId, Date.now())
+      try {
+        // A follow-up is a fresh child seeded with this thread's earlier turns:
+        // resuming the old child would notify the parent conversation.
+        const result = await runSideAgent(ctx, invocation, question, config, childId)
+        return { kind: 'success', text: `${result.text}\n\n[[${CHILD_MARKER}${result.childId}]]` }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        return { kind: 'error', text: message }
+      } finally {
+        inFlight.delete(parentId)
+      }
+    }
+
+    const question = raw
     if (question === '') {
       return {
         kind: 'success',
@@ -275,10 +540,10 @@ export function apply(ctx, rawConfig) {
       return { kind: 'error', text: `问题过长（${question.length} 字符，上限 ${config.maxQuestionChars}）。` }
     }
     const sessionId = invocation.agent.id
-    if (inFlight.has(sessionId)) {
+    if (busy(sessionId)) {
       return { kind: 'error', text: '上一个侧问还在跑，等它结束再问。' }
     }
-    inFlight.set(sessionId, invocation.commandId)
+    inFlight.set(sessionId, Date.now())
     try {
       const result = await runSideAgent(ctx, invocation, question, config)
       // The trailer names the child session so the Client can open that
@@ -307,6 +572,13 @@ export function apply(ctx, rawConfig) {
       handler,
     })
   }, 'dsh-btw command')
+
+  ctx.effect(() => {
+    const dispose = mountSettingsRoute(ctx, config)
+    return () => {
+      if (typeof dispose === 'function') dispose()
+    }
+  }, 'dsh-btw settings route')
 }
 
 export const inject = ['commands']

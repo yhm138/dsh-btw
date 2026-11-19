@@ -1,4 +1,4 @@
-﻿# dsh-btw bundle patch layer.
+# dsh-btw bundle patch layer.
 #
 # Listing `dsh-btw` in a profile's `dsh.profile.bundles` applies this layer. The
 # row name is the BARE package name so pnpm resolves it from the profile.
@@ -28,8 +28,10 @@
         # child session itself stays durable (it is a normal Session).
         disposeChild: true
         # Hard ceiling for one side question. A child whose approval prompt is
-        # never answered is cancelled instead of holding the command open.
-        sideAgentTimeoutMs: 180000
+        # never answered is cancelled instead of holding the command open. It is
+        # a deadlock guard, not a task budget: a child still working when this
+        # fires loses its answer, so the default is deliberately generous.
+        sideAgentTimeoutMs: 900000
         # Ceiling for one answer, so a runaway child cannot fill the command row.
         answerMaxChars: 12000
         # Pin the child's model route. Empty inherits the parent's route, which

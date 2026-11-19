@@ -150,7 +150,32 @@
 
 （`docs/92-collapsed.png` 里能看到按钮位于「对话/轨迹/用量」那一行最右侧、导航按钮旁。）
 
-## 9. 清理状态
+## 9. v0.2.0：Markdown / 追问 / 设置页 / 不污染复验
+
+四样都是用户直接要求的，且每一项都有对应的实测证据（`plugins/dsh-btw-research/verify_data.py`，`FAILURES: []`）。
+
+| 能力 | 实现 | 证据 |
+|---|---|---|
+| **Markdown 渲染** | 自写渲染器嵌在 `client.js` 内（`dsh.client` 只允许一个浏览器入口，所以不能拆第二个 entry） | `{rendered: "markdown", lists: 1}`；单测 9 项全过（含 raw HTML 不生成元素） |
+| **追问** | 面板卡片底部输入框 → 把 `/btw --continue <id> <问题>` 填进输入框 → 用户回车发送 | 答案 `KOALA-6147`，且复述的依据是线程首条消息 → 线程上下文生效 |
+| **设置页** | `settings.section` + `/api/dsh-btw/settings` + `configEditor.edit` | `HTTP 200 {ok:true}`；`answerMaxChars 12000→9000` 持久化 |
+| **头按钮** | `conversation.session.header.utilities` 里的 `◈ 侧问 N` | `data-count` 从 `null`（未问过）到 `1` |
+| **不污染主干** | 见下 | `settlement notice in parent: False` |
+
+### 追问为什么不用 `sendMessage`（关键设计变更）
+
+第一版追问用 `ctx.subagents.sendMessage()` 投给已存在的子会话。实测发现：**恢复子会话会让 subagent manager 往父会话推一条 settlement notice**（界面上显示为「子任务状态更新」），而这正是本功能要避免的污染。这条通知由 manager 生成，`tools.restrict()` 拦不住（restrict 只能移除子 agent 的工具）。
+
+改成：**每轮追问新起一个子 agent**，把这条线程此前的问答拼进 prompt（最多 8 轮）。代价是每轮重新继承一次父会话上下文（token 更贵），换来父会话完全无感。
+
+### 其它修正
+
+- `ctx.tools.restrict()` 签名：只接受 `{ allow?, deny? }`，传谓词会抛「requires a scoped context」，传空对象是 no-op。子 agent 侧用 `{ deny: ['send_message','spawn_teammate','wait_agent','list_agents','interrupt_agent'] }`。
+- `sideAgentTimeoutMs` 原 180s 会**掐死正常干活的子 agent**（表现为 `This operation was aborted`），改成 900s，并在配置注释里写明它是死锁兜底而非任务预算。
+- `inFlight` 改为时间戳判定陈旧，避免一次卡死的侧问永久锁住该会话。
+- 客户端组件加了 `data-dshbtw` / `data-state` / `data-followup` / `data-rendered` / `data-lists` / `data-count` 标记——验证脚本之前反复失败，多数是因为按文本/时序断言（曾把「本轮首条消息」误判为泄漏、把别的侧问卡片当成当前会话的）。
+
+## 10. 清理状态
 
 - `dsh-btw-probe` 已从 desktop profile 卸载（bundle 记录已移除），源码保留在 `plugins/dsh-btw-probe/` 供复跑。
 - 调研中间产物（asar 抽取、截图、脚本）在 `plugins/dsh-btw-research/`，不属于插件包。
