@@ -1,4 +1,4 @@
-﻿/**
+/**
  * dsh-btw — Antigravity-style `/btw` side questions for DeepSeek Harness.
  *
  * A `/btw <question>` line asks one question "by the way" while a task is in

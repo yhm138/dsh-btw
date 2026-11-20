@@ -1,4 +1,4 @@
-﻿// dsh-btw — Client half: the right-Sidebar "Side question" page and the
+// dsh-btw — Client half: the right-Sidebar "Side question" page and the
 // compact transcript chip.
 //
 // Data source: the Chat layer's own command nodes. `/btw` is a Host command, so
