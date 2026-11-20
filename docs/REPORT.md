@@ -175,7 +175,30 @@
 - `inFlight` 改为时间戳判定陈旧，避免一次卡死的侧问永久锁住该会话。
 - 客户端组件加了 `data-dshbtw` / `data-state` / `data-followup` / `data-rendered` / `data-lists` / `data-count` 标记——验证脚本之前反复失败，多数是因为按文本/时序断言（曾把「本轮首条消息」误判为泄漏、把别的侧问卡片当成当前会话的）。
 
-## 10. 清理状态
+## 10. 市场维护者反馈：UTF-8 BOM（已修，等复验）
+
+2026-11-18，awesome-dsh-plugin 的维护者在 PR #16474 上打了 `held: author` 标签并指出：
+
+> npm 上的 `@aspen138/dsh-btw@0.1.2`（latest）的 `package.json` 开头带 UTF-8 BOM（`EF BB BF`）。DSH 读取 `package.json` 时不去 BOM，`JSON.parse` 会失败，装完识别不到 `dsh.bundle`。
+
+**这是真缺陷，来源是我自己**：Windows 上 PowerShell 的 `Set-Content` / `Out-File` 默认写 BOM，我用它改过 `package.json`。这条评论最开始被漏看——只查了 PR 的 `state`，没查 comments/labels，20 小时后才在「看看有没有收录」时发现。
+
+### 处置
+
+| 版本 | 状态 |
+|---|---|
+| `0.1.2` | `package.json` 带 BOM（维护者核到的） |
+| `0.2.0` | `package.json` 已无 BOM，但 `client.js` / `index.js` / `screenshots.json` 仍带 |
+| `0.2.1` | 全包清干净 |
+| `0.2.2` | 同上，并把防回归脚本 `scripts/check-no-bom.py` 发进包里 |
+
+`0.2.2` 的发布物已逐字节复核：tarball 10 个文件**无一**带 `EF BB BF`，`package.json` 首字节 `123`（`{`）。
+
+`scripts/check-no-bom.py` 做两件事：遍历所有文件剥 BOM；用**不带 BOM 容忍**的 `json.loads` 校验每个 `.json`，任一失败即非零退出。已写进 README 的「发布前必跑」。
+
+PR 评论已回两次（先报 0.2.1，再更正为 0.2.2），等维护者复验合并。定时任务的提示词也改了，明确要求**必须读 comments 和 labels**。
+
+## 11. 清理状态
 
 - `dsh-btw-probe` 已从 desktop profile 卸载（bundle 记录已移除），源码保留在 `plugins/dsh-btw-probe/` 供复跑。
 - 调研中间产物（asar 抽取、截图、脚本）在 `plugins/dsh-btw-research/`，不属于插件包。
