@@ -1,0 +1,61 @@
+{
+  "name": "@aspen138/dsh-btw",
+  "version": "0.3.2",
+  "description": "Antigravity-style /btw side questions for DeepSeek Harness: ask one question mid-task and a disposable forked child agent answers it with the full tool set in its own right-Sidebar tab, with Markdown answers, follow-ups and a settings page, without adding anything to the main session's model context.",
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "dsh",
+    "btw",
+    "side-question",
+    "side-query",
+    "subagent",
+    "context"
+  ],
+  "license": "MIT",
+  "author": "yhm138",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE",
+    "scripts/check-no-bom.py"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yhm138/dsh-btw.git"
+  },
+  "homepage": "https://github.com/yhm138/dsh-btw#readme",
+  "bugs": {
+    "url": "https://github.com/yhm138/dsh-btw/issues"
+  },
+  "engines": {
+    "dsh": ">=0.2.1-rc.2 <0.3.0-0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  }
+}

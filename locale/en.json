@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Side question (/btw)",
+    "description": "Ask one contextual question mid-task with no tools; the answer opens in a floating panel and never enters the main session's model context."
+  }
+}
