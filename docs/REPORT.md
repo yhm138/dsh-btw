@@ -269,3 +269,59 @@ handler 的第一行调 `ctx.connection.requestRejection({ headers: req.headers 
 | 无 cookie、无 token 的全新浏览器上下文 | `401 {"ok":false,"error":"unauthorized"}` |
 
 已验证在修完之后：`0.3.1` 发布物 10 个文件、无 BOM。
+
+## 14. v0.4.0：侧问的运行进度（流式）
+
+需求：侧问里要能看到「使用工具、思考、回答」，并且是流式的。
+
+### 数据从哪来
+
+DSH 已经把这三样都发布出来了，插件之前把它们丢掉了：
+
+| 内容 | 事件 | 帧 |
+|---|---|---|
+| 思考 | `agent/assistant-stream` | `reasoning-delta` |
+| 回答正文 | `agent/assistant-stream` | `text-delta` |
+| 工具调用 | `agent/assistant-stream` | `tool-call-delta` + `block-end`（`block.type === 'tool-call'` 带完整 arguments） |
+| 工具结果 | `session/event` | `tool/result`（含 `message.toolCallId`、`error`） |
+
+`agent/assistant-stream` 是按 agent 作用域过滤的进程内事件：在**子 agent 自己的 ctx** 上订阅，就只会收到这个孩子的帧。所以跟踪器是在 `restrictReportingTools` 之后、用 `child.ctx.on(...)` 挂的，两条监听都在 `finally` 里摘掉。
+
+### 传输
+
+一个 SSE 路由，和设置路由共用同一套鉴权：
+
+```
+GET /api/dsh-btw/progress?parent=<父会话 id>&command=<command id>
+```
+
+键是 `<parent>\0<command>` —— `commandId` 本来就是 Chat 行（node）的标识，客户端不需要额外记账就能订阅。
+
+缓冲区按 `progressTtlMs`（默认 30 分钟）保留已发帧，`Last-Event-ID` 从上次位置续发，所以**页面刷新后前面发生的过程能补回来**。缓冲区上限 4000 帧，超出丢最旧。
+
+### 一个必须自己做的事
+
+裸 `webServer.register()` 的路由在 DSH 的 `/api` 鉴权栅栏**之前**，所以 handler 第一条语句就得问 `ctx.connection.requestRejection()`。实测（未带凭据）：
+
+```
+GET /api/dsh-btw/settings                 -> 401 {"ok":false,"error":"unauthorized"}
+GET /api/dsh-btw/progress?parent=a&command=b -> 401 unauthorized   （由本插件的 handler 写出）
+GET /api/dsh-btw/not-a-route              -> 401 （无 content-type，来自 DSH 栅栏本身）
+```
+
+三者的响应形态不同，这正好把「handler 真跑起来了」和「被栅栏挡下」区分开——这也是本轮调试里排除误判的方法。
+
+### 顺带修的一个配置陷阱
+
+profile 的 `cordis.patch.yml` 里那一行 dsh-btw 是 **`id:` 覆盖**，它把整个 `config` 替换掉，于是新加的默认值（`maxThreadTurns` / `maxThreadChars` / `streamProgress` / `progressTtlMs`）全被吃掉，而 `sideAgentTimeoutMs` 还是旧的 180000。已把该行补全为包含全部键；这也解释了为什么之前「改了默认值却不生效」。
+
+### 测试
+
+- `test/progress.test.py`（14 项）：客户端折叠器——思考/正文分别累加、工具只出现一次、结果按 id 归属、未知 id 忽略、`done` 不清空已streamed内容、重放不产生重复行。
+- `test/progress-host.test.py`（16 项）：Host 产出器——用假 `ctx`/假子 agent 喂真实帧形状，验证 tool-start 只发一次、`block-end` 带全参数、`tool/result` 能解析工具名、**其他会话的事件被忽略**、`finish` 之后不再收帧、`streamProgress: false` 只发一个状态帧、disposer 真能摘掉监听。
+
+全部 `ALL PASS`；连同原有三套（Markdown / 线程预算 / 日志重建）共五套。
+
+### 验证限制（如实记录）
+
+本轮的浏览器端到端验证**没能完成**：DSH 桌面进程的 GUI token 只存在于它自己的启动 URL 里，外部拿不到；尝试过独立探针 bundle（`Config.listConfigs` 报 `absent`，没加载）、插件内临时写文件（`apply` 里的 effect 没执行到）、IPC/leveldb 搜 token（无）、复用 CDP（`9230` 是 Host inspector 目标，`Browser.setDownloadBehavior` 不存在，Playwright 连不上）。所以本轮的证据是：**路由确已注册（401 响应形态可区分）+ 五套单测全绿**，而不是「我在界面上看见进度条在动」。

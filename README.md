@@ -6,9 +6,9 @@
 /btw 那个函数签名到底是什么？用到哪些参数？
 ```
 
-答案出现在**右侧边栏的「侧问」页签**里，支持 Markdown 渲染、追问、复制；对话流里只留一行安静的小标记。侧问跑在一个**临时 fork 子 agent** 里：继承当前会话已完成的轮次，工具全开，有自己的工作目录和沙箱策略，答完就释放。
+答案出现在**右侧边栏的「侧问」页签**里，**运行中实时显示进度**（思考、工具调用、逐步输出的答案），支持 Markdown 渲染、追问、复制；对话流里只留一行安静的小标记。侧问跑在一个**临时 fork 子 agent** 里：继承当前会话已完成的轮次，工具全开，有自己的工作目录和沙箱策略，答完就释放。
 
-**安装**：npm 包 `@aspen138/dsh-btw@0.3.1`（[npm](https://www.npmjs.com/package/@aspen138/dsh-btw) · [GitHub](https://github.com/yhm138/dsh-btw)）。已收录在 awesome-dsh-plugin（category `ui`），可在 DSH「发现」页搜 `btw` / `侧问` 一键安装。
+**安装**：npm 包 `@aspen138/dsh-btw@0.4.0`（[npm](https://www.npmjs.com/package/@aspen138/dsh-btw) · [GitHub](https://github.com/yhm138/dsh-btw)）。已收录在 awesome-dsh-plugin（category `ui`），可在 DSH「发现」页搜 `btw` / `侧问` 一键安装。
 
 ![右侧侧问面板](docs/screenshot-panel.png)
 
@@ -59,9 +59,31 @@
 
 实测（读会话日志）：一次 `/btw` 之后连续两次追问，两次都答出了首轮给的标记。
 
+## 实时进度
+
+侧问跑起来后，卡片会一边运行一边显示它正在做什么，而不是只转一个「运行中」：
+
+- **思考**（折叠，可展开）——模型的 reasoning 流；
+- **工具调用**——每次调用一行，显示工具名、参数摘要、以及结果预览（失败标红）；
+- **答案**——模型输出的正文边生成边渲染 Markdown。
+
+实现在两条链路上：
+
+| 半边 | 做法 |
+|---|---|
+| Host | 在子 agent 自己的 context 上订阅 `agent/assistant-stream`（`reasoning-delta` / `text-delta` / `tool-call-delta` / `block-end`）与 `session/event`（`tool/result`），转成紧凑帧写进按 `父会话 id + command id` 索引的缓冲区，由一个 SSE 路由 `GET /api/dsh-btw/progress?parent=…&command=…` 推给浏览器 |
+| Client | 卡片在运行中订阅该路由，用 `EventSource`（自带重连 + `Last-Event-ID` 重放），把帧折叠成「思考 / 工具 / 文本」三块；命令结算后收起，改显示正式答案 |
+
+几个刻意的选择：
+
+- **命令结果仍是权威**。流只负责「正在发生什么」，最终答案还是 `command/done` 里那份，所以断流、限流、刷新页面都不会让答案丢失。
+- **重放**。缓冲区保留已发出的帧，`Last-Event-ID` 从上次位置续，页面刷新后仍能补全前面发生的过程。
+- **鉴权**。这个路由和设置路由一样，第一条语句就调 `ctx.connection.requestRejection()`——裸 `webServer.register()` 的路由在 DSH 的 `/api` 栅栏之前，不自己问一句就等于对外开放。
+- **可关**。设置里的「实时显示进度」关掉后只发一个状态帧，运行期间不再推送内容。
+
 ## 设置页
 
-设置 → **侧问**，可以改：子 agent 权限包、审批策略、答案长度上限、追问轮数上限、追问字数上限、单次超时、问题长度上限、是否答完释放子 agent。保存后写回 profile 的 `cordis.patch.yml`，重启仍在。
+设置 → **侧问**，可以改：子 agent 权限包、审批策略、答案长度上限、追问轮数上限、追问字数上限、单次超时、问题长度上限、是否答完释放子 agent、**是否实时显示进度**。保存后写回 profile 的 `cordis.patch.yml`，重启仍在。
 
 ![设置页](docs/screenshot-settings.png)
 
@@ -99,6 +121,8 @@
     answerMaxChars: 12000           # 答案截断上限
     maxThreadTurns: 20              # 追问保留轮数
     maxThreadChars: 24000           # 追问保留字数（0 = 不限，只按轮数）
+    streamProgress: true            # 运行中实时推送思考/工具/答案
+    progressTtlMs: 1800000          # 结束后的帧保留多久（重开面板还能看到）
     maxThreads: 64                  # 内存里最多保留多少条线程
     threadTtlMs: 21600000           # 线程空闲多久后从内存清掉（6 小时）
     provider: ''                    # 固定子 agent 模型；空=继承父会话
@@ -113,7 +137,7 @@
 
 ## 已知限制
 
-- **不流式**：答案随命令结果一次性返回（子 agent 的干活过程在它自己的会话里，那里是流式的）。
+- **卡片里的进度是过程视图**：它跟着流更新，但最终答案以命令结果为准；缓冲上限 4000 帧，超长运行会丢最早的帧。
 - **审批面缺失**：见上。
 - **子会话持久化**：每次侧问（含追问）会在父会话下留一个子会话，可在子智能体视图里看到；执行句柄会释放，会话文件不自动删。
 - **一次一个**：同一会话上一个侧问未结束时，第二个被拒绝（超过 `sideAgentTimeoutMs` 会自动判定为陈旧并放行）。
@@ -124,7 +148,7 @@
 ```text
 dsh-btw/
   index.js           Host：/btw 命令、fork 子 agent、线程（内存+日志重建）、设置路由
-  client.js          Client：右侧页签 + 页面 + Markdown 渲染器 + chip + 头按钮 + 设置页
+  client.js          Client：右侧页签 + 页面 + Markdown 渲染器 + 进度视图 + chip + 头按钮 + 设置页
   cordis.patch.yml   bundle patch（默认值在这里）
   locale/*.json      插件管理里的标题/描述
   icon.svg           插件图标
@@ -143,6 +167,8 @@ dsh-btw/
 python test/markdown.test.py          # Markdown 渲染器
 python test/thread-budget.test.py     # 线程预算与保留
 python test/thread-from-log.test.py   # 从会话日志重建线程
+python test/progress.test.py          # 进度帧折叠（客户端）
+python test/progress-host.test.py     # 进度帧产出（Host）
 python scripts/check-no-bom.py        # 发布前编码检查
 ```
 

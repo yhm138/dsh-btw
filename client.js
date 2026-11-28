@@ -298,6 +298,11 @@ window.__ModuleLoader__.load({
         on: '开',
         off: '关',
         openChild: '查看子会话',
+        progressThinking: '思考中',
+        progressTool: '工具',
+        progressToolRunning: '运行中',
+        set_streamProgress: '实时显示进度',
+        set_streamProgressHint: '开着：侧问运行时卡片里实时显示思考、工具调用和逐步答案。关掉：只在结束时一次性显示答案（更省资源）。',
         openChildHint: '在右侧打开这条侧问的子会话：它的工具调用和审批都在那里',
         chipOpen: '在右侧打开这条侧问的子会话',
         questionPrefix: '问',
@@ -353,6 +358,11 @@ window.__ModuleLoader__.load({
         on: 'On',
         off: 'Off',
         openChild: 'Open sub-session',
+        progressThinking: 'Thinking',
+        progressTool: 'Tool',
+        progressToolRunning: 'running',
+        set_streamProgress: 'Show live progress',
+        set_streamProgressHint: 'On: the card shows thinking, tool calls and the answer as they stream. Off: only the final answer, which costs less.',
         openChildHint: "Open this side question's own session: its tool calls and approval prompts live there",
         chipOpen: "Open this side question's sub-session",
         questionPrefix: 'Q',
@@ -431,6 +441,28 @@ window.__ModuleLoader__.load({
       '.dshbtw-a.is-running{color:var(--dsw-alias-label-secondary);animation:dshbtw-pulse 1.4s ease-in-out infinite}',
       '@keyframes dshbtw-pulse{0%,100%{opacity:.55}50%{opacity:1}}',
       '@media(prefers-reduced-motion:reduce){.dshbtw-a.is-running{animation:none}}',
+      '.dshbtw-prog{display:flex;flex-direction:column;gap:5px;margin-top:2px;padding:7px 9px;',
+      'border:0.5px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-layer-1)}',
+      '.dshbtw-prog-think{font-size:12px;color:var(--dsw-alias-label-secondary)}',
+      '.dshbtw-prog-think-head{cursor:pointer;font-size:11px;color:var(--dsw-alias-state-idle-primary);list-style:none}',
+      '.dshbtw-prog-think-head::-webkit-details-marker{display:none}',
+      '.dshbtw-prog-think-head::before{content:"▸ ";display:inline-block;transition:transform .12s}',
+      '.dshbtw-prog-think[open] .dshbtw-prog-think-head::before{content:"▾ "}',
+      '.dshbtw-prog-think-body{margin-top:4px;white-space:pre-wrap;word-break:break-word;line-height:1.5;max-height:180px;overflow:auto}',
+      '.dshbtw-prog-tools{display:flex;flex-direction:column;gap:4px}',
+      '.dshbtw-prog-tool{display:flex;flex-direction:column;gap:2px;padding:4px 6px;border-radius:6px;background:var(--dsw-alias-bg-layer-2)}',
+      '.dshbtw-prog-tool.is-error{background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 8%,transparent)}',
+      '.dshbtw-prog-tool-head{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dsw-alias-label-primary)}',
+      '.dshbtw-prog-dot{flex:none;width:5px;height:5px;border-radius:50%;background:var(--dsw-alias-brand-primary)}',
+      '.dshbtw-prog-tool.is-error .dshbtw-prog-dot{background:var(--dsw-alias-state-error-primary)}',
+      '.dshbtw-prog-tool-name{flex:1;min-width:0;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      '.dshbtw-prog-tool-state{flex:none;font-size:11px;color:var(--dsw-alias-state-idle-primary);animation:dshbtw-pulse 1.4s ease-in-out infinite}',
+      '.dshbtw-prog-args{display:block;font-family:var(--dsw-font-mono,ui-monospace,monospace);font-size:11px;',
+      'color:var(--dsw-alias-label-secondary);white-space:pre-wrap;word-break:break-all;max-height:72px;overflow:auto}',
+      '.dshbtw-prog-result{font-size:11px;color:var(--dsw-alias-label-secondary);white-space:pre-wrap;word-break:break-word;',
+      'max-height:72px;overflow:auto;border-left:2px solid var(--dsw-alias-border-l1);padding-left:6px}',
+      '.dshbtw-prog-text{font-size:13px;color:var(--dsw-alias-label-primary);line-height:1.6}',
+      '@media(prefers-reduced-motion:reduce){.dshbtw-prog-tool-state{animation:none}}',
       '.dshbtw-actions{display:flex;align-items:center;gap:6px;margin-top:2px}',
       '.dshbtw-btn{display:inline-flex;align-items:center;justify-content:center;gap:4px;height:22px;padding:0 8px;',
       'border:0.5px solid var(--dsw-alias-border-l1);border-radius:6px;background:transparent;',
@@ -683,6 +715,211 @@ window.__ModuleLoader__.load({
      * Harness Client package, and the answer text must never be injected as
      * HTML. A failed render degrades to plain pre-wrapped text.
      */
+
+    /** Route served by this bundle's Host half for one run's live frames. */
+    const PROGRESS_ROUTE = '/api/dsh-btw/progress'
+
+    /**
+     * Follow one side question's live progress.
+     *
+     * Returns the accumulated view: reasoning text, text so far, and one row per
+     * tool call with its result preview. A finished run stops the subscription
+     * itself, so the caller only has to render.
+     *
+     * `EventSource` is used rather than `fetch` streaming because it reconnects on
+     * its own and replays from `Last-Event-ID`, which is what makes a page reload
+     * mid-run show the frames that already happened.
+     *
+     * @param parentId - the parent session id.
+     * @param commandId - the Chat row's command id.
+     * @param active - whether the run is still in flight.
+     * @returns the accumulated progress view.
+     */
+    function useProgress(parentId, commandId, active) {
+      const [view, setView] = React.useState(null)
+
+      React.useEffect(() => {
+        if (active !== true || typeof parentId !== 'string' || parentId === '' || typeof commandId !== 'string' || commandId === '') {
+          return undefined
+        }
+        if (typeof EventSource !== 'function') return undefined
+
+        const query = `parent=${encodeURIComponent(parentId)}&command=${encodeURIComponent(commandId)}`
+        let source
+        try {
+          source = new EventSource(`${PROGRESS_ROUTE}?${query}`)
+        } catch {
+          return undefined
+        }
+
+        let closed = false
+        const stop = () => {
+          closed = true
+          try {
+            source.close()
+          } catch {
+            /* already closed */
+          }
+        }
+
+        source.addEventListener('frame', (event) => {
+          if (closed === true) return
+          let frame
+          try {
+            frame = JSON.parse(event.data)
+          } catch {
+            return
+          }
+          setView((previous) => applyFrame(previous, frame))
+        })
+        source.addEventListener('end', stop)
+        source.addEventListener('error', () => {
+          // A finished run closes the stream; EventSource reports that as an
+          // error. Only stop on a real dead end, otherwise let it reconnect.
+          if (source.readyState === 2) stop()
+        })
+
+        return stop
+      }, [parentId, commandId, active])
+
+      return view
+    }
+
+    /** Fold one Host frame into the accumulated progress view. */
+    function applyFrame(previous, frame) {
+      if (frame === null || typeof frame !== 'object') return previous
+      const base = previous !== null && previous !== undefined
+        ? previous
+        : { reasoning: '', text: '', tools: [], toolIndex: {}, phase: 'started' }
+      if (frame.type === 'reasoning' && typeof frame.text === 'string') {
+        return { ...base, reasoning: base.reasoning + frame.text }
+      }
+      if (frame.type === 'text' && typeof frame.text === 'string') {
+        return { ...base, text: base.text + frame.text }
+      }
+      if (frame.type === 'tool-start' && typeof frame.name === 'string') {
+        const id = typeof frame.id === 'string' ? frame.id : `t${base.tools.length}`
+        if (base.toolIndex[id] !== undefined) return base
+        const tools = [...base.tools, { id, name: frame.name, args: '', result: '', isError: false, done: false }]
+        return { ...base, tools, toolIndex: { ...base.toolIndex, [id]: tools.length - 1 } }
+      }
+      if (frame.type === 'tool-call' && typeof frame.name === 'string') {
+        const id = typeof frame.id === 'string' ? frame.id : `t${base.tools.length}`
+        const at = base.toolIndex[id]
+        const tools = [...base.tools]
+        const entry = {
+          id,
+          name: frame.name,
+          args: typeof frame.arguments === 'string' ? frame.arguments : '',
+          result: at === undefined ? '' : tools[at].result,
+          isError: at === undefined ? false : tools[at].isError,
+          done: at === undefined ? false : tools[at].done,
+        }
+        if (at === undefined) tools.push(entry)
+        else tools[at] = entry
+        return { ...base, tools, toolIndex: { ...base.toolIndex, [id]: at === undefined ? tools.length - 1 : at } }
+      }
+      if (frame.type === 'tool-result') {
+        const id = typeof frame.id === 'string' ? frame.id : undefined
+        const at = id === undefined ? undefined : base.toolIndex[id]
+        if (at === undefined) return base
+        const tools = [...base.tools]
+        tools[at] = {
+          ...tools[at],
+          result: typeof frame.preview === 'string' ? frame.preview : '',
+          isError: frame.isError === true,
+          done: true,
+          ...(tools[at].name === '' && typeof frame.name === 'string' ? { name: frame.name } : {}),
+        }
+        return { ...base, tools }
+      }
+      if (frame.type === 'status' && typeof frame.phase === 'string') {
+        return { ...base, phase: frame.phase }
+      }
+      if (frame.type === 'done') {
+        return { ...base, phase: 'done' }
+      }
+      return base
+    }
+
+    /** One tool call row inside the progress view. */
+    function ProgressTool(props) {
+      const t = props.strings
+      const tool = props.tool
+      return h(
+        'div',
+        {
+          className: tool.isError ? 'dshbtw-prog-tool is-error' : 'dshbtw-prog-tool',
+          'data-dshbtw': 'progress-tool',
+          'data-tool': tool.name,
+          'data-done': tool.done ? 'true' : 'false',
+          ...(tool.isError ? { 'data-error': 'true' } : {}),
+        },
+        h(
+          'div',
+          { className: 'dshbtw-prog-tool-head' },
+          h('span', { className: 'dshbtw-prog-dot', 'aria-hidden': true }),
+          h('span', { className: 'dshbtw-prog-tool-name' }, tool.name === '' ? t.progressTool : tool.name),
+          tool.done ? null : h('span', { className: 'dshbtw-prog-tool-state' }, t.progressToolRunning),
+        ),
+        tool.args === '' ? null : h('code', { className: 'dshbtw-prog-args' }, tool.args),
+        tool.result === '' ? null : h('div', { className: 'dshbtw-prog-result' }, tool.result),
+      )
+    }
+
+    /** The in-flight view: thinking, tool calls, and the streaming answer. */
+    function ProgressView(props) {
+      const t = props.strings
+      const view = props.view
+      if (view === null || view === undefined) return null
+      const hasReasoning = typeof view.reasoning === 'string' && view.reasoning !== ''
+      const tools = Array.isArray(view.tools) ? view.tools : []
+      const text = typeof view.text === 'string' ? view.text : ''
+      if (!hasReasoning && tools.length === 0 && text === '') return null
+
+      const rows = [
+        hasReasoning
+          ? h(
+              'details',
+              { key: 'r', className: 'dshbtw-prog-think', 'data-dshbtw': 'progress-reasoning', open: tools.length === 0 && text === '' },
+              h('summary', { className: 'dshbtw-prog-think-head' }, t.progressThinking),
+              h('div', { className: 'dshbtw-prog-think-body' }, view.reasoning),
+            )
+          : null,
+      ]
+      if (tools.length > 0) {
+        rows.push(
+          h(
+            'div',
+            { key: 'tools', className: 'dshbtw-prog-tools', 'data-dshbtw': 'progress-tools', 'data-count': String(tools.length) },
+            tools.map((tool) => h(ProgressTool, { key: tool.id, tool, strings: t })),
+          ),
+        )
+      }
+      if (text !== '') {
+        let rendered = null
+        if (typeof md.renderMarkdown === 'function') {
+          try {
+            rendered = md.renderMarkdown(text)
+          } catch {
+            rendered = null
+          }
+        }
+        rows.push(
+          h(
+            'div',
+            { key: 'text', className: 'dshbtw-prog-text', 'data-dshbtw': 'progress-text', 'data-chars': String(text.length) },
+            rendered !== null && (!Array.isArray(rendered) || rendered.length > 0) ? rendered : text,
+          ),
+        )
+      }
+      return h(
+        'div',
+        { className: 'dshbtw-prog', 'data-dshbtw': 'progress', 'data-phase': typeof view.phase === 'string' ? view.phase : 'started' },
+        rows,
+      )
+    }
+
     function AnswerBody(props) {
       const t = props.strings
       const view = props.view
@@ -736,6 +973,7 @@ window.__ModuleLoader__.load({
       const record = props.record
       const view = viewOf(record)
       const [copied, setCopied] = React.useState(false)
+      const progress = useProgress(props.sessionId, view.commandId, view.running)
       const [draft, setDraft] = React.useState('')
       const [sent, setSent] = React.useState(false)
 
@@ -783,6 +1021,7 @@ window.__ModuleLoader__.load({
             view.running ? t.running : view.failed ? t.failed : t.done,
           ),
         ),
+        view.running ? h(ProgressView, { key: 'p', view: progress, strings: t }) : null,
         h(AnswerBody, { key: 'a', view, strings: t }),
         view.running
           ? null
@@ -1096,6 +1335,15 @@ window.__ModuleLoader__.load({
               onChange: (event) => patch('disposeChild', event.target.checked),
             }),
             h('span', null, values.disposeChild !== false ? t.on : t.off),
+          )),
+        h(SettingRow, { key: 'stream', label: t.set_streamProgress, hint: t.set_streamProgressHint },
+          h('label', { className: 'dshbtw-set-toggle' },
+            h('input', {
+              type: 'checkbox',
+              checked: values.streamProgress !== false,
+              onChange: (event) => patch('streamProgress', event.target.checked),
+            }),
+            h('span', null, values.streamProgress !== false ? t.on : t.off),
           )),
         h('button', { key: 'save', className: 'dshbtw-set-save', disabled: saving || !dirty, onClick: save },
           saving ? t.setSaving : t.setSave),

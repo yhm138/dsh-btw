@@ -41,6 +41,13 @@
         # (newest turns kept, oldest dropped first). `0` disables the char cap.
         maxThreadTurns: 20
         maxThreadChars: 24000
+        # Live progress: while the side agent works, the panel renders its thinking,
+        # tool calls and the answer as they stream (one SSE route per running
+        # question). Off means the card only shows the final answer.
+        streamProgress: true
+        # How long a finished run's frames stay readable, so reopening the panel (or
+        # a page reload) still shows what happened.
+        progressTtlMs: 1800000
         # Pin the child's model route. Empty inherits the parent's route, which
         # also keeps the inherited prefix cache-reusable.
         provider: ''

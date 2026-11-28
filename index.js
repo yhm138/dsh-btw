@@ -41,6 +41,8 @@ const DEFAULTS = Object.freeze({
   answerMaxChars: 12000,
   maxThreadTurns: 20,
   maxThreadChars: 24000,
+  streamProgress: true,
+  progressTtlMs: 1800000,
 })
 
 /**
@@ -54,6 +56,122 @@ const CHILD_MARKER = 'dsh-btw:child='
 
 /** Matches the trailer and captures the child id. */
 const CHILD_PATTERN = /\[\[dsh-btw:child=([^\]\s]+)\]\]/u
+
+/** Route that streams one side question's live progress. */
+const PROGRESS_ROUTE = '/api/dsh-btw/progress'
+
+/** Cap on retained frames per run; the oldest are dropped past this. */
+const PROGRESS_MAX_FRAMES = 4000
+
+/** How much of a tool result is kept for the progress view. */
+const PROGRESS_PREVIEW_CHARS = 240
+
+/**
+ * Live progress, keyed by `<parent session id>\0<command id>`.
+ *
+ * The command id is already the identity of one Chat row, so pairing it with the
+ * parent session gives the Client a key it can subscribe to without learning
+ * anything new. Entries outlive the run by `progressTtlMs` so reopening the panel
+ * (or a page reload) still shows what the side agent did.
+ */
+const PROGRESS = new Map()
+
+/** Build the buffer key for one run. */
+function progressKey(parentId, commandId) {
+  return `${String(parentId)}\u0000${String(commandId)}`
+}
+
+/** Get or create one run's buffer. */
+function progressEntry(parentId, commandId) {
+  const key = progressKey(parentId, commandId)
+  let entry = PROGRESS.get(key)
+  if (entry === undefined) {
+    entry = { frames: [], firstId: 0, nextId: 0, done: false, touchedAt: Date.now(), listeners: new Set() }
+    PROGRESS.set(key, entry)
+  }
+  return entry
+}
+
+/** Serialize one frame as an SSE message. */
+function sseFrame(entry, frame) {
+  const id = entry.nextId
+  entry.nextId += 1
+  entry.frames.push(frame)
+  while (entry.frames.length > PROGRESS_MAX_FRAMES) {
+    entry.frames.shift()
+    entry.firstId += 1
+  }
+  return `id: ${id}\nevent: frame\ndata: ${JSON.stringify(frame)}\n\n`
+}
+
+/** Append one frame and fan it out to every open subscriber. */
+function emitProgress(parentId, commandId, frame) {
+  const entry = progressEntry(parentId, commandId)
+  if (entry.done === true) return
+  entry.touchedAt = Date.now()
+  const payload = sseFrame(entry, frame)
+  for (const listener of entry.listeners) {
+    try {
+      listener.write(payload)
+    } catch {
+      entry.listeners.delete(listener)
+    }
+  }
+}
+
+/** Close one run: record the last frame, tell subscribers, drop them. */
+function finishProgress(parentId, commandId, frame) {
+  const entry = progressEntry(parentId, commandId)
+  if (entry.done === true) return
+  entry.touchedAt = Date.now()
+  const payload = sseFrame(entry, frame)
+  entry.done = true
+  for (const listener of entry.listeners) {
+    try {
+      listener.write(`${payload}event: end\ndata: {}\n\n`)
+      listener.end()
+    } catch {
+      /* a subscriber that already left needs no closing frame */
+    }
+  }
+  entry.listeners.clear()
+}
+
+/** Forget finished runs past their TTL, and reap runs whose process is gone. */
+function pruneProgress(config, now = Date.now()) {
+  for (const [key, entry] of PROGRESS) {
+    if (entry.done !== true && now - entry.touchedAt > config.sideAgentTimeoutMs) {
+      entry.done = true
+      for (const listener of entry.listeners) {
+        try {
+          listener.end()
+        } catch {
+          /* ignore */
+        }
+      }
+      entry.listeners.clear()
+    }
+    if (now - entry.touchedAt > config.progressTtlMs) PROGRESS.delete(key)
+  }
+}
+
+/** Clip one string for a progress frame. */
+function clipProgress(value, max) {
+  const text = typeof value === 'string' ? value : ''
+  return text.length > max ? `${text.slice(0, max)}…` : text
+}
+
+/** Pull a short text preview out of a tool result message. */
+function toolResultPreview(message) {
+  const parts = []
+  const content = Array.isArray(message?.content) ? message.content : []
+  for (const block of content) {
+    if (block === null || typeof block !== 'object') continue
+    if (block.type === 'text' && typeof block.text === 'string') parts.push(block.text)
+  }
+  return clipProgress(parts.join('\n').trim(), PROGRESS_PREVIEW_CHARS)
+}
+
 
 /**
  * Frame one side question, optionally continuing an earlier thread.
@@ -263,6 +381,8 @@ function normalizeConfig(raw) {
     answerMaxChars: number(input.answerMaxChars, DEFAULTS.answerMaxChars, 200, 200000),
     maxThreadTurns: number(input.maxThreadTurns, DEFAULTS.maxThreadTurns, 1, 200),
     maxThreadChars: number(input.maxThreadChars, DEFAULTS.maxThreadChars, 0, 2000000),
+    streamProgress: typeof input.streamProgress === 'boolean' ? input.streamProgress : DEFAULTS.streamProgress,
+    progressTtlMs: number(input.progressTtlMs, DEFAULTS.progressTtlMs, 60000, 86400000),
     maxThreads: number(input.maxThreads, DEFAULTS.maxThreads, 1, 4096),
     threadTtlMs: number(input.threadTtlMs, DEFAULTS.threadTtlMs, 60000, 604800000),
     provider: typeof input.provider === 'string' ? input.provider : '',
@@ -310,6 +430,140 @@ function failureText(result) {
  * @param config - normalized options.
  * @returns `{ text, childId }` on success.
  */
+
+/**
+ * Publish one side agent's live progress while it works.
+ *
+ * Returns a disposer. Every emit is best-effort: a subscriber that went away or a
+ * frame the Client cannot parse must never break the run that is producing the
+ * actual answer.
+ *
+ * @param ctx - Host plugin context.
+ * @param parentId - the parent session id (part of the buffer key).
+ * @param commandId - the Chat row's command id (the other half of the key).
+ * @param childId - the child agent whose frames to follow.
+ * @param config - normalized options.
+ * @returns a disposer that detaches both listeners.
+ */
+function trackProgress(ctx, parentId, commandId, childId, config) {
+  const emit = (frame) => {
+    try {
+      emitProgress(parentId, commandId, frame)
+    } catch {
+      /* progress is advisory; the run itself must not fail on it */
+    }
+  }
+  if (config.streamProgress !== true) {
+    emit({ type: 'status', phase: 'started' })
+    return () => {}
+  }
+
+  const agents = ctx.get('agents')
+  const child = agents !== null && agents !== undefined && typeof agents.get === 'function'
+    ? agents.get(childId)
+    : undefined
+  if (child === undefined || child === null) return () => {}
+
+  emit({ type: 'status', phase: 'started' })
+
+  /** One tool call still streaming its arguments, by stream block index. */
+  const openToolCalls = new Map()
+  /** Tool call id -> name, so a result can name the tool that produced it. */
+  const toolNames = new Map()
+
+  const onStream = (payload) => {
+    const frame = payload !== null && typeof payload === 'object' ? payload.frame : undefined
+    if (frame === null || frame === undefined || frame.type !== 'chunk') return
+    const chunk = frame.chunk
+    if (chunk === null || typeof chunk !== 'object') return
+    try {
+      if (chunk.type === 'reasoning-delta' && typeof chunk.text === 'string' && chunk.text !== '') {
+        emit({ type: 'reasoning', text: chunk.text })
+        return
+      }
+      if (chunk.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text !== '') {
+        emit({ type: 'text', text: chunk.text })
+        return
+      }
+      if (chunk.type === 'tool-call-delta') {
+        const index = Number.isFinite(chunk.index) ? chunk.index : 0
+        const open = openToolCalls.get(index) ?? { name: '', arguments: '', announced: false }
+        if (typeof chunk.name === 'string' && chunk.name !== '') open.name = chunk.name
+        if (typeof chunk.argumentsDelta === 'string') open.arguments += chunk.argumentsDelta
+        openToolCalls.set(index, open)
+        if (open.announced === false && open.name !== '') {
+          open.announced = true
+          if (chunk.id !== undefined) toolNames.set(String(chunk.id), open.name)
+          emit({ type: 'tool-start', name: open.name, id: chunk.id === undefined ? undefined : String(chunk.id) })
+        }
+        return
+      }
+      if (chunk.type === 'block-end') {
+        const block = chunk.block
+        if (block !== null && typeof block === 'object' && block.type === 'tool-call') {
+          const index = Number.isFinite(chunk.index) ? chunk.index : 0
+          const open = openToolCalls.get(index) ?? { name: '', arguments: '', announced: false }
+          const name = typeof block.name === 'string' && block.name !== '' ? block.name : open.name
+          if (block.id !== undefined) toolNames.set(String(block.id), name)
+          emit({
+            type: 'tool-call',
+            id: block.id === undefined ? undefined : String(block.id),
+            name,
+            arguments: clipProgress(typeof block.arguments === 'string' ? block.arguments : open.arguments, 400),
+          })
+          openToolCalls.delete(index)
+        }
+        return
+      }
+      if (chunk.type === 'finish') {
+        emit({ type: 'status', phase: 'settling' })
+      }
+    } catch {
+      /* a malformed chunk must not break the stream */
+    }
+  }
+
+  const onSessionEvent = (session, event) => {
+    try {
+      if (session === null || session === undefined || String(session.id) !== String(childId)) return
+      if (event.type === 'tool/result') {
+        const data = event.data
+        const callId = data?.message?.toolCallId
+        const name = callId === undefined ? undefined : toolNames.get(String(callId))
+        emit({
+          type: 'tool-result',
+          id: callId === undefined ? undefined : String(callId),
+          name,
+          isError: data?.error !== undefined || data?.message?.isError === true,
+          preview: toolResultPreview(data?.message),
+        })
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const disposers = []
+  try {
+    if (typeof child.ctx?.on === 'function') {
+      disposers.push(child.ctx.on('agent/assistant-stream', onStream))
+      disposers.push(child.ctx.on('session/event', onSessionEvent))
+    }
+  } catch {
+    /* a stale child cannot be followed; the command result still arrives */
+  }
+
+  return () => {
+    for (const dispose of disposers) {
+      try {
+        if (typeof dispose === 'function') dispose()
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
+
 async function runSideAgent(ctx, invocation, question, config, threadKey) {
   const agents = ctx.get('agents')
   const subagents = ctx.get('subagents')
@@ -381,6 +635,16 @@ async function runSideAgent(ctx, invocation, question, config, threadKey) {
    */
   restrictReportingTools(ctx, activation)
 
+  // Follow this child's frames so the panel can show work in progress. The
+  // recorded answer still arrives through the command result below.
+  const stopTracking = trackProgress(
+    ctx,
+    invocation.agent.id,
+    invocation.commandId,
+    activation.childId,
+    config,
+  )
+
   try {
     // Apply the side agent's permission bundle before its first tool call can
     // settle. `read-only` / `workspace-write` carry approval: 'ask', which is
@@ -432,8 +696,13 @@ async function runSideAgent(ctx, invocation, question, config, threadKey) {
       THREAD_TOUCHED.delete(threadKey)
     }
     rememberTurn(key, question, text, config)
+    finishProgress(invocation.agent.id, invocation.commandId, { type: 'done', childId })
     return { text: clip(text, config.answerMaxChars), childId, threadKey: key }
   } finally {
+    stopTracking()
+    // A run that failed before its success path never settled the buffer; close
+    // it so subscribers are not left holding an open stream.
+    finishProgress(invocation.agent.id, invocation.commandId, { type: 'done', childId: undefined })
     clearTimeout(timer)
     if (callerSignal !== undefined && callerSignal !== null && typeof callerSignal.removeEventListener === 'function') {
       callerSignal.removeEventListener('abort', forwardAbort)
@@ -513,6 +782,8 @@ const EDITABLE_KEYS = Object.freeze([
   'answerMaxChars',
   'maxThreadTurns',
   'maxThreadChars',
+  'streamProgress',
+  'progressTtlMs',
   'provider',
   'model',
 ])
@@ -520,17 +791,129 @@ const EDITABLE_KEYS = Object.freeze([
 /** Coerce one submitted value to the type its config key expects. */
 function coerce(key, value) {
   if (key === 'disposeChild') return value === true || value === 'true'
+  if (key === 'streamProgress') return value === true || value === 'true'
   if (
     key === 'maxQuestionChars'
     || key === 'sideAgentTimeoutMs'
     || key === 'answerMaxChars'
     || key === 'maxThreadTurns'
     || key === 'maxThreadChars'
+    || key === 'progressTtlMs'
   ) {
     const number = Number(value)
     return Number.isFinite(number) ? number : undefined
   }
   return typeof value === 'string' ? value : undefined
+}
+
+
+/**
+ * Serve one side question's live progress over Server-Sent Events.
+ *
+ * The route is registered on the raw web server, which sits **before** DSH's
+ * `/api` authentication fence, so the handler asks `ctx.connection` for the same
+ * admission check the built-in routes get. Without it any web page could read a
+ * session's side-question activity.
+ *
+ * `Last-Event-ID` replays from the buffer, which is what makes a page reload in
+ * the middle of a run show the frames that already happened.
+ *
+ * @param ctx - Host plugin context.
+ * @param config - normalized options.
+ * @returns a disposer, or undefined when the Host has no web server.
+ */
+function mountProgressRoute(ctx, config) {
+  const webServer = ctx.get('webServer')
+  if (webServer === null || webServer === undefined || typeof webServer.register !== 'function') return undefined
+
+  const handler = (req, res) => {
+    const connection = ctx.get('connection')
+    if (connection === null || connection === undefined || typeof connection.requestRejection !== 'function') {
+      res.writeHead(503, { 'content-type': 'text/plain; charset=utf-8' })
+      res.end('connection service unavailable')
+      return
+    }
+    let rejection
+    try {
+      rejection = connection.requestRejection({ headers: req.headers })
+    } catch {
+      rejection = 403
+    }
+    if (rejection !== undefined) {
+      res.writeHead(rejection, { 'content-type': 'text/plain; charset=utf-8' })
+      res.end(rejection === 401 ? 'unauthorized' : 'forbidden')
+      return
+    }
+
+    let url
+    try {
+      url = new URL(req.url ?? '/', 'http://dsh.invalid')
+    } catch {
+      res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' })
+      res.end('bad request')
+      return
+    }
+    const parentId = url.searchParams.get('parent')
+    const commandId = url.searchParams.get('command')
+    if (parentId === null || parentId === '' || commandId === null || commandId === '') {
+      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify({ ok: false, error: 'parent and command are required' }))
+      return
+    }
+
+    pruneProgress(config)
+
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-store, no-transform',
+      connection: 'keep-alive',
+      'x-accel-buffering': 'no',
+    })
+
+    const entry = progressEntry(parentId, commandId)
+
+    // Replay whatever the buffer already holds, then either close (run already
+    // finished) or stay attached for the live frames.
+    const lastEventId = Number(req.headers['last-event-id'])
+    const from = Number.isFinite(lastEventId) && lastEventId >= 0 ? Math.max(0, Math.trunc(lastEventId) + 1) : entry.firstId
+    for (let index = from; index < entry.nextId; index += 1) {
+      const frame = entry.frames[index - entry.firstId]
+      if (frame === undefined) continue
+      res.write(`id: ${index}\nevent: frame\ndata: ${JSON.stringify(frame)}\n\n`)
+    }
+
+    if (entry.done === true) {
+      res.write('event: end\ndata: {}\n\n')
+      res.end()
+      return
+    }
+
+    entry.touchedAt = Date.now()
+    entry.listeners.add(res)
+
+    /** Detach this subscriber; the run itself keeps going. */
+    const detach = () => {
+      entry.listeners.delete(res)
+    }
+    req.on('close', detach)
+    req.on('aborted', detach)
+    res.on('close', detach)
+    res.on('error', detach)
+
+    // Comment frames keep proxies and the browser from timing the stream out.
+    const heartbeat = setInterval(() => {
+      try {
+        res.write(': keep-alive\n\n')
+      } catch {
+        clearInterval(heartbeat)
+        detach()
+      }
+    }, 15000)
+    if (typeof heartbeat.unref === 'function') heartbeat.unref()
+    res.on('close', () => clearInterval(heartbeat))
+  }
+
+  return webServer.register({ kind: 'exact', path: PROGRESS_ROUTE, handler })
 }
 
 /**
@@ -779,6 +1162,16 @@ export function apply(ctx, rawConfig) {
       if (typeof dispose === 'function') dispose()
     }
   }, 'dsh-btw settings route')
+
+
+
+  ctx.effect(() => {
+    const dispose = mountProgressRoute(ctx, config)
+    return () => {
+      if (typeof dispose === 'function') dispose()
+      PROGRESS.clear()
+    }
+  }, 'dsh-btw progress route')
 }
 
 export const inject = ['commands']
