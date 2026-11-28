@@ -8,7 +8,7 @@
 
 答案出现在**右侧边栏的「侧问」页签**里，**运行中实时显示进度**（思考、工具调用、逐步输出的答案），支持 Markdown 渲染、追问、复制；对话流里只留一行安静的小标记。侧问跑在一个**临时 fork 子 agent** 里：继承当前会话已完成的轮次，工具全开，有自己的工作目录和沙箱策略，答完就释放。
 
-**安装**：npm 包 `@aspen138/dsh-btw@0.5.0`（[npm](https://www.npmjs.com/package/@aspen138/dsh-btw) · [GitHub](https://github.com/yhm138/dsh-btw)）。已收录在 awesome-dsh-plugin（category `ui`），可在 DSH「发现」页搜 `btw` / `侧问` 一键安装。
+**安装**：npm 包 `@aspen138/dsh-btw@0.5.1`（[npm](https://www.npmjs.com/package/@aspen138/dsh-btw) · [GitHub](https://github.com/yhm138/dsh-btw)）。已收录在 awesome-dsh-plugin（category `ui`），可在 DSH「发现」页搜 `btw` / `侧问` 一键安装。
 
 ![右侧侧问面板](docs/screenshot-panel.png)
 
