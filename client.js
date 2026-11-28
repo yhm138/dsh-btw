@@ -237,7 +237,7 @@ window.__ModuleLoader__.load({
     const KIND = 'btw'
 
     /** Set by `apply`; the transcript chip uses it to reveal the page. */
-    const navigation = { open: undefined, openChild: undefined }
+    const navigation = { open: undefined, openChild: undefined, openQuestion: undefined }
 
     /** Diagnostic surface for verification runs; never user-visible. */
     const debug = { tabs: false, right: false, lastError: null, open: undefined }
@@ -298,6 +298,8 @@ window.__ModuleLoader__.load({
         on: '开',
         off: '关',
         openChild: '查看子会话',
+        tabTitle: '侧问',
+        openQuestion: '打开这条侧问',
         progressThinking: '思考中',
         progressTool: '工具',
         progressToolRunning: '运行中',
@@ -358,6 +360,8 @@ window.__ModuleLoader__.load({
         on: 'On',
         off: 'Off',
         openChild: 'Open sub-session',
+        tabTitle: 'Side question',
+        openQuestion: 'Open this side question',
         progressThinking: 'Thinking',
         progressTool: 'Tool',
         progressToolRunning: 'running',
@@ -441,6 +445,7 @@ window.__ModuleLoader__.load({
       '.dshbtw-a.is-running{color:var(--dsw-alias-label-secondary);animation:dshbtw-pulse 1.4s ease-in-out infinite}',
       '@keyframes dshbtw-pulse{0%,100%{opacity:.55}50%{opacity:1}}',
       '@media(prefers-reduced-motion:reduce){.dshbtw-a.is-running{animation:none}}',
+      '.dshbtw-tabtitle{display:block;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
       '.dshbtw-prog{display:flex;flex-direction:column;gap:5px;margin-top:2px;padding:7px 9px;',
       'border:0.5px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-layer-1)}',
       '.dshbtw-prog-think{font-size:12px;color:var(--dsw-alias-label-secondary)}',
@@ -636,16 +641,16 @@ window.__ModuleLoader__.load({
       const view = viewOf(data)
       const state = view.running ? t.running : view.failed ? t.failed : t.done
 
-      // A fresh question reveals the side agent's own conversation: that is
-      // where its tool calls and approval prompts live. The child id only
-      // arrives with the settled answer, so this also fires on completion.
-      React.useEffect(() => {
-        if (view.childId === undefined) return
-        const at = Number(data.time)
-        const fresh = Number.isFinite(at) ? Date.now() - at < 300000 : false
-        if (!fresh) return
-        if (typeof navigation.openChild === 'function') navigation.openChild(view.childId, props.sessionId)
-      }, [view.childId, data.time])
+      // Pressing Enter should raise the column, not wait for a click. This runs as
+      // soon as the command row exists — while the child is still working — so the
+      // progress view is visible for the whole run.
+      useAutoOpen(
+        typeof data.commandId === 'string' ? data.commandId : '',
+        view.childId,
+        view.question,
+        view.running,
+        data.time,
+      )
 
       return h(
         'button',
@@ -657,8 +662,8 @@ window.__ModuleLoader__.load({
           ...(view.childId === undefined ? {} : { 'data-child': view.childId }),
           title: t.chipOpen,
           onClick: () => {
-            if (view.childId !== undefined && typeof navigation.openChild === 'function') {
-              navigation.openChild(view.childId, props.sessionId)
+            if (typeof navigation.openQuestion === 'function' && typeof data.commandId === 'string') {
+              navigation.openQuestion(data.commandId, view.childId, view.question)
               return
             }
             if (typeof navigation.open === 'function') navigation.open()
@@ -1083,6 +1088,162 @@ window.__ModuleLoader__.load({
       )
     }
 
+
+    /**
+     * The tab chip's text for one side question.
+     *
+     * The tab is opened before the answer exists, so the title comes from the
+     * question the command carried. `params.question` is what the open call passed;
+     * reading the command record covers a tab restored from a saved layout, where
+     * params are not in hand yet.
+     */
+    function BtwTabTitle(props) {
+      const t = props.__btwStrings
+      const params = props.navigation !== null && props.navigation !== undefined ? props.navigation.params : undefined
+      const wanted = params !== null && typeof params === 'object' && typeof params.commandId === 'string'
+        ? params.commandId
+        : undefined
+      const records = useBtwRecords(props.useChat)
+      const record = wanted === undefined ? undefined : records.find((row) => String(row.commandId ?? '') === wanted)
+      const view = record === undefined ? undefined : viewOf(record)
+      const fromParams = params !== null && typeof params === 'object' && typeof params.question === 'string'
+        ? params.question
+        : ''
+      const text = view !== undefined && view.question !== '' ? view.question : fromParams
+      return h('span', { className: 'dshbtw-tabtitle', 'data-dshbtw': 'tab-title' }, text === '' ? t.typeLabel : text)
+    }
+
+    /**
+     * Open one side question in its own tab, once.
+     *
+     * The tab body is what the user looks at while the child works, so waiting for
+     * a click at the bottom of the transcript is the wrong default: pressing Enter
+     * should raise the column. `navigation.openQuestion` is idempotent per command
+     * id within this page session, so a re-render or a reconnect does not stack
+     * tabs.
+     *
+     * @param commandId - the Chat row's command id.
+     * @param childId - the child session the answer names, when it is known.
+     * @param question - the question text, used as the tab title.
+     */
+    function useAutoOpen(commandId, childId, question, running, time) {
+      const key = `${String(commandId)}\u0000${String(childId ?? '')}`
+      React.useEffect(() => {
+        if (typeof commandId !== 'string' || commandId === '') return
+        if (typeof navigation.openQuestion !== 'function') return
+        // A page load mounts a chip for every `/btw` the session ever ran. Only a
+        // run that is still going, or one that just settled, should raise the
+        // column — otherwise opening the app would spawn a tab per old question.
+        const at = Number(time)
+        const fresh = running === true || (Number.isFinite(at) && Date.now() - at < 120000)
+        if (!fresh) return
+        navigation.openQuestion(commandId, childId, question)
+      }, [key])
+    }
+
+    /**
+     * One side question's own page: the run, then this thread's follow-ups.
+     *
+     * A tab is opened per question, so the page shows exactly one thread instead of
+     * every side question the session ever asked. The question it belongs to comes
+     * from `navigation.params`, which the sidebar hands to the body.
+     */
+    function BtwQuestionPage(props) {
+      const t = props.__btwStrings
+      const records = useBtwRecords(props.useChat)
+      const params = props.navigation !== null && props.navigation !== undefined ? props.navigation.params : undefined
+      const wanted = params !== null && typeof params === 'object' && typeof params.commandId === 'string'
+        ? params.commandId
+        : undefined
+
+      const thread = React.useMemo(() => {
+        if (wanted === undefined) return []
+        const root = records.find((record) => String(record.commandId ?? '') === wanted)
+        if (root === undefined) return []
+        // Seed only with the root's own child. Seeding with every child in the
+        // session would make every follow-up look like this thread's, which is
+        // exactly the isolation this page exists to provide.
+        const rootView = viewOf(root)
+        const childIds = new Set()
+        if (rootView.childId !== undefined) childIds.add(rootView.childId)
+        // A follow-up belongs to this thread when the id it continues is a child this
+        // thread already produced. Records are already in seq order, so one forward
+        // pass is enough and cannot double-count: each record is visited once.
+        const mine = []
+        for (const record of records) {
+          if (record === root) continue
+          const continued = typeof record.args === 'string' ? CONTINUE_FORM.exec(record.args.trim()) : null
+          if (continued === null) continue
+          if (!childIds.has(continued[1])) continue
+          mine.push(record)
+          const view = viewOf(record)
+          if (view.childId !== undefined) childIds.add(view.childId)
+        }
+        return [root, ...mine]
+      }, [records, wanted])
+
+      const inputActions = props.inputActions
+      const onFollowUp = React.useCallback(
+        (childId, nextQuestion) => {
+          const line = `/btw --continue ${childId} ${nextQuestion}`
+          try {
+            if (inputActions !== null && inputActions !== undefined && typeof inputActions.setDraft === 'function') {
+              inputActions.setDraft(line)
+              return true
+            }
+          } catch {
+            /* fall through to false */
+          }
+          return false
+        },
+        [inputActions],
+      )
+
+      return h(
+        'div',
+        {
+          className: 'dshbtw-page',
+          role: 'region',
+          'aria-label': t.badge,
+          'data-dshbtw': 'question-page',
+          'data-count': String(thread.length),
+          ...(wanted === undefined ? {} : { 'data-command': wanted }),
+        },
+        h('style', { key: 'style' }, CSS),
+        thread.length === 0
+          ? h(
+              'div',
+              { key: 'empty', className: 'dshbtw-empty' },
+              h('div', { key: 'title', className: 'dshbtw-empty-title' }, t.emptyTitle),
+              h('div', { key: 'hint', className: 'dshbtw-empty-hint' }, t.emptyHint),
+            )
+          : [...thread].reverse().map((record) =>
+              h(SideQuestionCard, {
+                key: String(record.commandId ?? record.seq),
+                record,
+                strings: t,
+                sessionId: props.sessionId,
+                onFollowUp,
+              }),
+            ),
+      )
+    }
+
+    /**
+     * What a side-question tab renders.
+     *
+     * A tab opened for one question carries `params.commandId` and shows that
+     * thread alone. The header button opens the same kind with no params, which
+     * means "show me the history", so that case keeps the aggregate list.
+     */
+    function BtwTabBody(props) {
+      const params = props.navigation !== null && props.navigation !== undefined ? props.navigation.params : undefined
+      const commandId = params !== null && typeof params === 'object' && typeof params.commandId === 'string'
+        ? params.commandId
+        : undefined
+      return commandId === undefined ? h(BtwPage, props) : h(BtwQuestionPage, props)
+    }
+
     /**
      * The right-Sidebar page body: newest side question first.
      *
@@ -1488,6 +1649,40 @@ window.__ModuleLoader__.load({
           navigation.open()
         }
 
+        /**
+         * Open one side question's tab, once per command id.
+         *
+         * `multiple: true` on the type means every open is a distinct instance, so
+         * the address carries the command id; the registry composes the rest. A
+         * repeated call for the same id focuses the existing tab instead of opening
+         * a second one, which is why a re-render does not stack tabs.
+         */
+        const opened = new Set()
+        navigation.openQuestion = (commandId, childId, question) => {
+          const id = String(commandId ?? '')
+          if (id === '') return
+          if (opened.has(id)) return
+          opened.add(id)
+          try {
+            if (right === null || right === undefined || typeof right.openTab !== 'function') return
+            // The chip text comes from the kind's live title seat, not from an
+            // open-time option: `openTab` reads only placement and `params`, and
+            // `definition.title(address)` supplies the captured fallback.
+            right.openTab(KIND, {
+              params: {
+                commandId: id,
+                ...(typeof childId === 'string' && childId !== '' ? { childId } : {}),
+                ...(typeof question === 'string' && question !== '' ? { question } : {}),
+              },
+              revealIfOpened: true,
+            })
+            debug.lastError = null
+          } catch (error) {
+            debug.lastError = error instanceof Error ? error.message : String(error)
+          }
+        }
+
+        debug.openQuestion = navigation.openQuestion
         debug.tabs = tabs !== null && tabs !== undefined
         debug.right = right !== null && right !== undefined
         debug.open = navigation.open
@@ -1501,6 +1696,10 @@ window.__ModuleLoader__.load({
                 id: TYPE_ID,
                 kind: KIND,
                 priority: 'extension',
+                // One tab per side question: independent instances rather than a
+                // single shared page, which is what makes separate questions read as
+                // separate windows.
+                multiple: true,
                 title: () => strings.typeLabel,
                 guide: [
                   {
@@ -1515,10 +1714,24 @@ window.__ModuleLoader__.load({
             'dsh-btw tab type',
           )
 
+          // The chip's text is captured when the tab opens, so a title that follows
+          // the question needs the optional title seat.
+          ctx.slots.inject('sidebar.right.pane.tab.title', () =>
+            ctx.slots.register(
+              { name: 'sidebar.right.pane.tab.title', key: TYPE_ID },
+              (props) => h(Boundary, { fallback: null }, h(BtwTabTitle, { ...props, __btwStrings: strings })),
+            ),
+          )
+
           ctx.slots.inject('sidebar.right.pane.tab', () =>
             ctx.slots.register(
               { name: 'sidebar.right.pane.tab', key: TYPE_ID },
-              (props) => h(Boundary, { fallback: null }, h(BtwPage, { ...props, __btwStrings: strings })),
+              (props) =>
+                h(
+                  Boundary,
+                  { fallback: null },
+                  h(BtwTabBody, { ...props, __btwStrings: strings }),
+                ),
             ),
           )
         }

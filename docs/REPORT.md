@@ -325,3 +325,51 @@ profile 的 `cordis.patch.yml` 里那一行 dsh-btw 是 **`id:` 覆盖**，它�
 ### 验证限制（如实记录）
 
 本轮的浏览器端到端验证**没能完成**：DSH 桌面进程的 GUI token 只存在于它自己的启动 URL 里，外部拿不到；尝试过独立探针 bundle（`Config.listConfigs` 报 `absent`，没加载）、插件内临时写文件（`apply` 里的 effect 没执行到）、IPC/leveldb 搜 token（无）、复用 CDP（`9230` 是 Host inspector 目标，`Browser.setDownloadBehavior` 不存在，Playwright 连不上）。所以本轮的证据是：**路由确已注册（401 响应形态可区分）+ 五套单测全绿**，而不是「我在界面上看见进度条在动」。
+
+## 15. v0.5.0：一条侧问一个窗口 + 回车即打开 + 线程隔离
+
+三个需求：回车后主动在右侧打开、不同侧问是独立窗口、同一侧问里能多次追问。
+
+### 做法
+
+| 需求 | 机制 |
+|---|---|
+| 回车即打开 | chip 一挂载就调 `navigation.openQuestion()`；它用 `right.openTab(KIND, { params, revealIfOpened: true })`，面板会自己展开 |
+| 一条一问 | tab 类型声明 `multiple: true`。`placeTab()` 的实现是 `pageAddress(kind) + '/' + randomUUID()`，所以每次都是独立实例（终端同机制） |
+| 页签名 = 问题 | 注册 `sidebar.right.pane.tab.title` 席位。`openTab` 只读「placement + params」，**不接受 open-time title**，chip 文本来自 `definition.title(address)` 捕获值；要跟内容走就必须占这个 title 席位 |
+| 同窗口多次追问 | 追问框已经按卡片的 `view.childId` 生成 `--continue`；新版页签按线程过滤，所以追问留在同一个窗口 |
+
+### 修掉的一个真 bug（隔离失效）
+
+第一版 `BtwQuestionPage` 的线程归属算法把**会话里所有 child id** 都作为初始集合：
+
+```js
+for (const record of records) {
+  const view = viewOf(record)
+  if (view.childId !== undefined) childIds.add(view.childId)   // ← 全塞进去了
+}
+```
+
+后果是任何一条 `--continue <任意 child>` 都能命中集合，于是**每条追问都会出现在每条侧问的窗口里**，正好把"独立窗口"这个需求做废。已改为只用根节点的 child 作种子，单测守着。
+
+### 顺手删掉的一个死参数
+
+`right.openTab(kind, { title })` 里的 `title` 是无效的：`place()` 只透传 `paneId` / `replaceTab` / `preferNewPane` / `revealIfOpened` 和 `params`，标题由 `definition.title(address)` 决定。留着会让人以为能用，改成注释说明 + 走 title 席位。
+
+### 避免的一个副作用
+
+页面上每一条历史 `/btw` 都有一个 chip，如果一律自动打开，**每次打开应用都会冒出一排页签**。所以加了新鲜度判断：只在 `running === true` 或 `Date.now() - time < 120000` 时打开。
+
+### 运行时证据
+
+`cordis_inspect_query` 的 `Slots.listSubTree` 显示 `dsh-btw/side-questions` 同时占据：
+
+- `sidebar.right.pane.tab`（页签主体）
+- `sidebar.right.pane.tab.title`（页签标题）
+
+后者是本轮新增的席位，它出现在 occupants 里说明注册确实生效。**注意这只能证明注册成功，不能证明交互观感**——和 0.4.0 一样，浏览器端到端仍未完成（GUI token 拿不到，见第 14 节）。
+
+### 测试
+
+- 新增 `test/thread-membership.test.py`（8 项）：两条独立线程互不串台、链式追问归属、把追问当根、未知 id、缺 child id 不误匹配。
+- 六套单测全部 `ALL PASS`。
